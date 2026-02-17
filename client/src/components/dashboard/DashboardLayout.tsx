@@ -1,20 +1,21 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
-import { TemporalNavigator } from "./TemporalNavigator";
-import { AITutor } from "./AITutor";
-import { LiveChart, type LiveChartHandle } from "./LiveChart";
 import { TickerTabs } from "./TickerTabs";
+import { StrategyRoom } from "./StrategyRoom";
+import { ActionDashboard } from "./ActionDashboard";
 import { fetchTickers, fetchNotesByTicker, fetchFullNote, fetchPriceRatio, seedData, isFuturesSymbol, type TickerData, type NoteData, type FullNote, type PriceRatioData } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
-import { LogOut } from "lucide-react";
+import { LogOut, BookOpen, BarChart3 } from "lucide-react";
+import { cn } from "@/lib/utils";
+
+type RoomMode = "strategy" | "action";
 
 export function DashboardLayout() {
   const { user, logout } = useAuth();
+  const [roomMode, setRoomMode] = useState<RoomMode>("strategy");
   const [selectedTickerId, setSelectedTickerId] = useState<number | null>(null);
   const [selectedNoteId, setSelectedNoteId] = useState<number | null>(null);
   const [seeded, setSeeded] = useState(false);
-  const chartRef = useRef<LiveChartHandle>(null);
 
   useEffect(() => {
     seedData().then(() => setSeeded(true)).catch(() => setSeeded(true));
@@ -40,12 +41,14 @@ export function DashboardLayout() {
   });
 
   useEffect(() => {
-    if (notes.length > 0) {
+    if (notes.length > 0 && selectedNoteId === null) {
       setSelectedNoteId(notes[0].id);
-    } else {
+    } else if (notes.length > 0 && !notes.find(n => n.id === selectedNoteId)) {
+      setSelectedNoteId(notes[0].id);
+    } else if (notes.length === 0) {
       setSelectedNoteId(null);
     }
-  }, [notes]);
+  }, [notes, selectedNoteId]);
 
   const { data: activeNote } = useQuery<FullNote>({
     queryKey: ["/api/notes", selectedNoteId, "full"],
@@ -65,10 +68,6 @@ export function DashboardLayout() {
     setSelectedTickerId(tickerId);
     setSelectedNoteId(null);
   };
-
-  const handleSyncToLevel = useCallback((price: number, label: string, color: string) => {
-    chartRef.current?.syncToLevel(price, label, color);
-  }, []);
 
   const [clockTime, setClockTime] = useState(new Date().toLocaleTimeString());
   useEffect(() => {
@@ -90,12 +89,44 @@ export function DashboardLayout() {
   return (
     <div className="h-screen w-full bg-background text-foreground overflow-hidden flex flex-col">
       <header className="h-11 border-b border-border bg-card flex items-center px-4 justify-between shrink-0 z-10">
-        <div className="flex items-center gap-2">
-          <div className="h-4 w-4 bg-primary rounded-sm animate-pulse" />
-          <h1 className="text-sm font-bold tracking-widest uppercase font-mono text-primary" data-testid="text-app-title">
-            TraderNotes AI <span className="text-muted-foreground opacity-50">v1.0</span>
-          </h1>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <div className="h-4 w-4 bg-primary rounded-sm animate-pulse" />
+            <h1 className="text-sm font-bold tracking-widest uppercase font-mono text-primary" data-testid="text-app-title">
+              TraderNotes AI
+            </h1>
+          </div>
+
+          <div className="flex items-center bg-muted/30 rounded-lg p-0.5 border border-border/50" data-testid="room-toggle">
+            <button
+              onClick={() => setRoomMode("strategy")}
+              data-testid="button-strategy-room"
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-mono font-bold tracking-wide transition-all",
+                roomMode === "strategy"
+                  ? "bg-primary text-primary-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              <BookOpen className="h-3 w-3" />
+              Strategy Room
+            </button>
+            <button
+              onClick={() => setRoomMode("action")}
+              data-testid="button-action-dashboard"
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-mono font-bold tracking-wide transition-all",
+                roomMode === "action"
+                  ? "bg-primary text-primary-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              <BarChart3 className="h-3 w-3" />
+              Action Dashboard
+            </button>
+          </div>
         </div>
+
         <div className="flex items-center gap-4 text-xs font-mono text-muted-foreground">
           <div className="flex items-center gap-1">
             <span className="w-2 h-2 rounded-full bg-green-500" />
@@ -130,36 +161,24 @@ export function DashboardLayout() {
       />
 
       <div className="flex-1 overflow-hidden">
-        <ResizablePanelGroup direction="horizontal">
-          <ResizablePanel defaultSize={20} minSize={15} maxSize={30} className="bg-sidebar border-r border-border">
-            <TemporalNavigator
-              notes={notes}
-              activeNote={activeNote || null}
-              activeTicker={activeTicker}
-              selectedNoteId={selectedNoteId}
-              onSelectNote={setSelectedNoteId}
-              priceRatio={priceRatio || null}
-              onSyncToLevel={handleSyncToLevel}
-            />
-          </ResizablePanel>
-
-          <ResizableHandle withHandle />
-
-          <ResizablePanel defaultSize={30} minSize={20} maxSize={40} className="bg-background">
-            <AITutor activeNote={activeNote || null} activeTicker={activeTicker} />
-          </ResizablePanel>
-
-          <ResizableHandle withHandle />
-
-          <ResizablePanel defaultSize={50} minSize={30} className="bg-black">
-            <LiveChart
-              ref={chartRef}
-              activeTicker={activeTicker}
-              activeNote={activeNote || null}
-              priceRatio={priceRatio || null}
-            />
-          </ResizablePanel>
-        </ResizablePanelGroup>
+        {roomMode === "strategy" ? (
+          <StrategyRoom
+            activeTicker={activeTicker}
+            activeNote={activeNote || null}
+            notes={notes}
+            selectedNoteId={selectedNoteId}
+            onSelectNote={setSelectedNoteId}
+          />
+        ) : (
+          <ActionDashboard
+            activeTicker={activeTicker}
+            activeNote={activeNote || null}
+            notes={notes}
+            selectedNoteId={selectedNoteId}
+            onSelectNote={setSelectedNoteId}
+            priceRatio={priceRatio || null}
+          />
+        )}
       </div>
     </div>
   );
