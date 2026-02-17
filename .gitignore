@@ -1,0 +1,20 @@
+node_modules
+dist
+.DS_Store
+server/public
+vite.config.ts.*
+*.tar.gz
+
+# Replit files
+.replit
+replit.nix
+.replit.nix
+.upm/
+.config/
+.cache/
+replit.md
+package-lock.json
+package.json
+
+# Attached assets
+attached_assets/
