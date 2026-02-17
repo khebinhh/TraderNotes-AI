@@ -18,8 +18,47 @@ import fs from "fs";
 import path from "path";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { GoogleAIFileManager, FileState } from "@google/generative-ai/server";
+async function extractTextFromFile(filePath: string, mimeType: string): Promise<string> {
+  if (mimeType === "application/pdf") {
+    const pdfParseModule = await import("pdf-parse");
+    const pdfParseFn = (pdfParseModule as any).default || pdfParseModule;
+    const dataBuffer = fs.readFileSync(filePath);
+    const pdfData = await pdfParseFn(dataBuffer);
+    return pdfData.text.slice(0, 50000);
+  }
+  if (mimeType === "text/csv" || mimeType === "text/plain") {
+    return fs.readFileSync(filePath, "utf-8").slice(0, 50000);
+  }
+  return "";
+}
 
-const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 10 * 1024 * 1024 } });
+const multerStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    const dir = "/tmp/uploads/";
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname) || ".bin";
+    cb(null, `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`);
+  },
+});
+const upload = multer({ storage: multerStorage, limits: { fileSize: 10 * 1024 * 1024 } });
+
+function inferMimeType(originalName: string, browserMime: string): string {
+  if (browserMime && browserMime !== "application/octet-stream") return browserMime;
+  const ext = path.extname(originalName).toLowerCase();
+  const mimeMap: Record<string, string> = {
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".csv": "text/csv",
+    ".txt": "text/plain",
+    ".webp": "image/webp",
+  };
+  return mimeMap[ext] || browserMime || "application/octet-stream";
+}
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 const fileManager = new GoogleAIFileManager(process.env.GEMINI_API_KEY || "");
@@ -464,7 +503,7 @@ ${contextInfo}
 
       if (req.file) {
         try {
-          const mimeType = req.file.mimetype || "application/octet-stream";
+          const mimeType = inferMimeType(req.file.originalname, req.file.mimetype);
           const uploadResult = await fileManager.uploadFile(req.file.path, {
             mimeType,
             displayName: req.file.originalname,
@@ -488,12 +527,24 @@ ${contextInfo}
             console.error(`Gemini file in unexpected state: ${file.state}`);
             fileProcessingFailed = true;
           }
-        } catch (fileErr) {
-          console.error("Gemini file upload error:", fileErr);
-          fileProcessingFailed = true;
+        } catch (fileErr: any) {
+          console.warn("Gemini file upload error, trying text fallback:", fileErr?.message);
+          try {
+            const chatMimeType = inferMimeType(req.file!.originalname, req.file!.mimetype);
+            const fileContent = await extractTextFromFile(req.file!.path, chatMimeType);
+            if (fileContent) {
+              parts.push({ text: `[Document content from "${req.file!.originalname}"]:\n\n${fileContent}` });
+            } else if (chatMimeType.startsWith("image/")) {
+              const imageData = fs.readFileSync(req.file!.path);
+              parts.push({ inlineData: { mimeType: chatMimeType, data: imageData.toString("base64") } });
+            } else {
+              fileProcessingFailed = true;
+            }
+          } catch {
+            fileProcessingFailed = true;
+          }
         } finally {
           try { if (tempFilePath) fs.unlinkSync(tempFilePath); } catch {}
-          tempFilePath && (req.file = undefined as any);
         }
       }
 
@@ -874,35 +925,59 @@ The JSON must follow this EXACT structure:
         systemInstruction: playbookSystemPrompt,
         generationConfig: {
           temperature: 0.1,
-          maxOutputTokens: 8192,
+          maxOutputTokens: 16384,
           responseMimeType: "application/json",
         },
       });
 
       const parts: any[] = [];
 
-      const mimeType = req.file.mimetype || "application/octet-stream";
-      const uploadResult = await fileManager.uploadFile(req.file.path, {
-        mimeType,
-        displayName: originalFilename,
-      });
+      const mimeType = inferMimeType(originalFilename, req.file.mimetype);
 
-      let file = uploadResult.file;
-      let attempts = 0;
-      while (file.state === FileState.PROCESSING && attempts < 60) {
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-        const result = await fileManager.getFile(file.name);
-        file = result;
-        attempts++;
-      }
-
-      if (file.state !== FileState.ACTIVE) {
-        return res.status(500).json({
-          message: "File processing failed. Please try again or use a different file format.",
+      try {
+        const uploadResult = await fileManager.uploadFile(req.file.path, {
+          mimeType,
+          displayName: originalFilename,
         });
+
+        let file = uploadResult.file;
+        let attempts = 0;
+        while (file.state === FileState.PROCESSING && attempts < 60) {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          const result = await fileManager.getFile(file.name);
+          file = result;
+          attempts++;
+        }
+
+        if (file.state === FileState.ACTIVE) {
+          parts.push({ fileData: { mimeType: file.mimeType, fileUri: file.uri } });
+        } else {
+          console.warn("Gemini file not ACTIVE after processing, falling back to text extraction");
+          const fileContent = await extractTextFromFile(req.file.path, mimeType);
+          if (fileContent) {
+            parts.push({ text: `[Document content from "${originalFilename}"]:\n\n${fileContent}` });
+          } else {
+            return res.status(500).json({ message: "Unable to extract text from this file type. Try PDF, CSV, or text files." });
+          }
+        }
+      } catch (uploadErr: any) {
+        console.warn("Gemini File API upload failed, falling back to text extraction:", uploadErr?.message);
+        try {
+          const fileContent = await extractTextFromFile(req.file.path, mimeType);
+          if (fileContent) {
+            parts.push({ text: `[Document content from "${originalFilename}"]:\n\n${fileContent}` });
+          } else if (mimeType.startsWith("image/")) {
+            const imageData = fs.readFileSync(req.file.path);
+            parts.push({ inlineData: { mimeType, data: imageData.toString("base64") } });
+          } else {
+            return res.status(500).json({ message: "Failed to process file. Please try a different file format." });
+          }
+        } catch (extractErr: any) {
+          console.error("Text extraction also failed:", extractErr?.message);
+          return res.status(500).json({ message: "Failed to process file. Please try a different file format (PDF, PNG, JPG, CSV)." });
+        }
       }
 
-      parts.push({ fileData: { mimeType: file.mimeType, fileUri: file.uri } });
       parts.push({ text: userMessage || `Analyze this document and extract a complete trading playbook for ${ticker.symbol}. Return ONLY the JSON structure.` });
 
       const result = await model.generateContent({ contents: [{ role: "user", parts }] });
