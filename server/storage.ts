@@ -1,7 +1,7 @@
 import { eq, desc, and } from "drizzle-orm";
 import { db } from "./db";
 import {
-  tickers, notes, calculatedLevels, dailyChecklists, checklistItems, events, chatMessages,
+  tickers, notes, calculatedLevels, dailyChecklists, checklistItems, events, chatMessages, playbooks,
   type Ticker, type InsertTicker,
   type Note, type InsertNote,
   type CalculatedLevel, type InsertCalculatedLevel,
@@ -9,6 +9,7 @@ import {
   type ChecklistItem, type InsertChecklistItem,
   type Event, type InsertEvent,
   type ChatMessage, type InsertChatMessage,
+  type Playbook, type InsertPlaybook,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -46,6 +47,12 @@ export interface IStorage {
   getChatMessages(userId: string): Promise<ChatMessage[]>;
   getChatMessagesByTicker(tickerId: number, userId: string): Promise<ChatMessage[]>;
   createChatMessage(message: InsertChatMessage): Promise<ChatMessage>;
+
+  getPlaybooks(userId: string): Promise<Playbook[]>;
+  getPlaybooksByTicker(tickerId: number, userId: string): Promise<Playbook[]>;
+  getPlaybook(id: number, userId: string): Promise<Playbook | undefined>;
+  createPlaybook(playbook: InsertPlaybook): Promise<Playbook>;
+  updatePlaybookReview(id: number, userId: string, review: string): Promise<Playbook | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -189,6 +196,32 @@ export class DatabaseStorage implements IStorage {
   async createChatMessage(message: InsertChatMessage): Promise<ChatMessage> {
     const [created] = await db.insert(chatMessages).values(message).returning();
     return created;
+  }
+
+  async getPlaybooks(userId: string): Promise<Playbook[]> {
+    return db.select().from(playbooks).where(eq(playbooks.userId, userId)).orderBy(desc(playbooks.createdAt));
+  }
+
+  async getPlaybooksByTicker(tickerId: number, userId: string): Promise<Playbook[]> {
+    return db.select().from(playbooks).where(and(eq(playbooks.tickerId, tickerId), eq(playbooks.userId, userId))).orderBy(desc(playbooks.createdAt));
+  }
+
+  async getPlaybook(id: number, userId: string): Promise<Playbook | undefined> {
+    const [pb] = await db.select().from(playbooks).where(and(eq(playbooks.id, id), eq(playbooks.userId, userId)));
+    return pb;
+  }
+
+  async createPlaybook(playbook: InsertPlaybook): Promise<Playbook> {
+    const [created] = await db.insert(playbooks).values(playbook).returning();
+    return created;
+  }
+
+  async updatePlaybookReview(id: number, userId: string, review: string): Promise<Playbook | undefined> {
+    const [updated] = await db.update(playbooks)
+      .set({ userReview: review })
+      .where(and(eq(playbooks.id, id), eq(playbooks.userId, userId)))
+      .returning();
+    return updated;
   }
 }
 

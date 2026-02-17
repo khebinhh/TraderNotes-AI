@@ -1,11 +1,12 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { TickerTabs } from "./TickerTabs";
 import { StrategyRoom } from "./StrategyRoom";
-import { ActionDashboard } from "./ActionDashboard";
+import { ActionDashboard, type ActionDashboardHandle } from "./ActionDashboard";
 import { fetchTickers, fetchNotesByTicker, fetchFullNote, fetchPriceRatio, seedData, isFuturesSymbol, type TickerData, type NoteData, type FullNote, type PriceRatioData } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
 import { LogOut, BookOpen, BarChart3 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 
 type RoomMode = "strategy" | "action";
@@ -13,6 +14,9 @@ type RoomMode = "strategy" | "action";
 export function DashboardLayout() {
   const { user, logout } = useAuth();
   const [roomMode, setRoomMode] = useState<RoomMode>("strategy");
+  const actionDashboardRef = useRef<ActionDashboardHandle>(null);
+  const pendingLevelRef = useRef<{ price: number; label: string; color: string } | null>(null);
+  const { toast } = useToast();
   const [selectedTickerId, setSelectedTickerId] = useState<number | null>(null);
   const [selectedNoteId, setSelectedNoteId] = useState<number | null>(null);
   const [seeded, setSeeded] = useState(false);
@@ -168,15 +172,26 @@ export function DashboardLayout() {
             notes={notes}
             selectedNoteId={selectedNoteId}
             onSelectNote={setSelectedNoteId}
+            onAddToChart={(price, label, color) => {
+              pendingLevelRef.current = { price, label, color };
+              setRoomMode("action");
+              toast({
+                title: "Level added to chart",
+                description: `${label} at ${price}`,
+              });
+            }}
           />
         ) : (
           <ActionDashboard
+            ref={actionDashboardRef}
             activeTicker={activeTicker}
             activeNote={activeNote || null}
             notes={notes}
             selectedNoteId={selectedNoteId}
             onSelectNote={setSelectedNoteId}
             priceRatio={priceRatio || null}
+            pendingLevel={pendingLevelRef.current}
+            onPendingLevelConsumed={() => { pendingLevelRef.current = null; }}
           />
         )}
       </div>

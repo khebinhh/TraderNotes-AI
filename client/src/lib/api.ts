@@ -104,7 +104,7 @@ export async function toggleChecklistItem(id: number, isCompleted: boolean): Pro
   return res.json();
 }
 
-export async function sendChatMessage(tickerId: number, content: string, file?: File): Promise<{ userMessage: ChatMsg; aiMessage: ChatMsg }> {
+export async function sendChatMessage(tickerId: number, content: string, file?: File): Promise<{ userMessage: ChatMsg; aiMessage: ChatMsg; createdNoteId?: number | null }> {
   const formData = new FormData();
   formData.append("content", content);
   if (file) {
@@ -156,6 +156,82 @@ export interface PriceRatioData {
 export async function fetchPriceRatio(symbol: string): Promise<PriceRatioData> {
   const res = await fetch(`/api/price-ratio/${encodeURIComponent(symbol)}`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch price ratio");
+  return res.json();
+}
+
+export interface PlaybookZoneLevel {
+  price: number;
+  price_high: number | null;
+  label: string;
+  context: string;
+  source: string;
+}
+
+export interface PlaybookScenario {
+  id: string;
+  condition: string;
+  outcome: string;
+  zone: "green" | "yellow" | "red";
+  source: string;
+}
+
+export interface PlaybookEvent {
+  title: string;
+  time: string;
+  impact: "high" | "medium" | "low";
+  expected_behavior: string;
+}
+
+export interface PlaybookData {
+  macro_theme: string;
+  bias: "Bullish" | "Bearish" | "Neutral" | "Open";
+  thesis: string;
+  structural_zones: {
+    bullish_green: PlaybookZoneLevel[];
+    neutral_yellow: PlaybookZoneLevel[];
+    bearish_red: PlaybookZoneLevel[];
+  };
+  if_then_scenarios: PlaybookScenario[];
+  key_events: PlaybookEvent[];
+  risk_factors: string[];
+  execution_checklist: string[];
+}
+
+export interface Playbook {
+  id: number;
+  userId: string | null;
+  tickerId: number | null;
+  date: string;
+  playbookData: PlaybookData;
+  userReview: string | null;
+  createdAt: string;
+}
+
+export async function analyzeDocument(tickerId: number, file: File, content?: string): Promise<Playbook> {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("tickerId", String(tickerId));
+  if (content) formData.append("content", content);
+  const res = await fetch("/api/analyze-document", {
+    method: "POST",
+    body: formData,
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: "Document analysis failed" }));
+    throw new Error(err.message);
+  }
+  return res.json();
+}
+
+export async function fetchPlaybooks(tickerId: number): Promise<Playbook[]> {
+  const res = await fetch(`/api/tickers/${tickerId}/playbooks`, { credentials: "include" });
+  if (!res.ok) throw new Error("Failed to fetch playbooks");
+  return res.json();
+}
+
+export async function updatePlaybookReview(id: number, review: string): Promise<Playbook> {
+  const res = await apiRequest("PATCH", `/api/playbooks/${id}/review`, { review });
   return res.json();
 }
 
