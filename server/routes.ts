@@ -11,6 +11,7 @@ import {
   insertEventSchema,
   insertChatMessageSchema,
   insertTickerSchema,
+  insertJournalEntrySchema,
 } from "@shared/schema";
 import { z } from "zod";
 import multer from "multer";
@@ -324,6 +325,27 @@ export async function registerRoutes(
         }
       }
 
+      const tickerPlaybooks = await storage.getPlaybooksByTicker(tickerId, userId);
+      if (tickerPlaybooks.length > 0) {
+        const activePlaybook = tickerPlaybooks[0];
+        const pbData = activePlaybook.playbookData as any;
+        contextInfo += `\n## ACTIVE PLAYBOOK (${activePlaybook.date})\n`;
+        contextInfo += `Bias: ${pbData.bias || "Open"}\n`;
+        contextInfo += `Macro Theme: ${pbData.macro_theme || "N/A"}\n`;
+        if (pbData.thesis) contextInfo += `Thesis: ${pbData.thesis.slice(0, 500)}\n`;
+        if (pbData.structural_zones) {
+          const green = pbData.structural_zones.bullish_green || [];
+          const yellow = pbData.structural_zones.neutral_yellow || [];
+          const red = pbData.structural_zones.bearish_red || [];
+          if (green.length > 0) contextInfo += `GREEN Zone Levels: ${green.map((l: any) => `${l.price}${l.price_high ? `-${l.price_high}` : ""} (${l.label})`).join(", ")}\n`;
+          if (yellow.length > 0) contextInfo += `YELLOW Zone Levels: ${yellow.map((l: any) => `${l.price}${l.price_high ? `-${l.price_high}` : ""} (${l.label})`).join(", ")}\n`;
+          if (red.length > 0) contextInfo += `RED Zone Levels: ${red.map((l: any) => `${l.price}${l.price_high ? `-${l.price_high}` : ""} (${l.label})`).join(", ")}\n`;
+        }
+        if (pbData.if_then_scenarios && pbData.if_then_scenarios.length > 0) {
+          contextInfo += `If/Then Scenarios:\n${pbData.if_then_scenarios.map((s: any) => `- ${s.condition} → ${s.outcome}`).join("\n")}\n`;
+        }
+      }
+
       const chatHistory = await storage.getChatMessagesByTicker(tickerId, userId);
       const recentMessages = chatHistory.slice(-20);
       let geminiHistory = recentMessages.map((m) => ({
@@ -415,8 +437,18 @@ Interpret these trading terms naturally when encountered:
 - **VPOC**: Volume Point of Control
 - **RTH/ETH**: Regular/Extended Trading Hours
 - **MNQ/MES**: Micro Nasdaq/S&P Futures
+- **Spike Base**: A technical level where a price "spike" began — the origin point of a sharp directional move
 - **Flip Date**: Date where directional bias may change
 - **Gap Fill**: Price returning to fill a previous gap
+
+## SPATIAL OCR — CHART IMAGE ANALYSIS
+
+When a chart image is uploaded, perform Spatial OCR:
+1. Read the Y-axis to find exact price values
+2. Identify horizontal lines, trendlines, and annotations drawn on the chart
+3. Cross-reference visible price levels with the Active Playbook JSON (if available)
+4. Report what zone the current price is in (Green/Yellow/Red) based on the playbook
+5. NEVER assume or round prices — if the chart shows 6922, report 6922, not 6920
 
 ## OUTPUT STRUCTURE FOR DOCUMENT ANALYSIS
 
@@ -843,9 +875,18 @@ You MUST understand and correctly interpret:
 - **p-shaped profile**: Indicates short covering (buyers stepping in)
 - **Snap Zone**: Price area where aggressive directional moves originate
 - **Thinking Box**: Neutral consolidation zone where price chops
+- **Spike Base**: A technical level where a price "spike" began — the origin point of a sharp directional move
 - **Flip Date**: Date where directional bias may change
 - **Gap Fill**: Price returning to fill a previous gap
 - **MNQ/MES**: Micro Nasdaq/S&P Futures
+
+## SPATIAL OCR — CHART IMAGE ANALYSIS
+
+When a chart image is uploaded:
+1. Read the Y-axis to find exact price values visible on the chart
+2. Identify every horizontal line, trendline, and annotation
+3. NEVER assume or round prices — if the chart shows 6922, report 6922, not 6920
+4. Always prefer Document Data over internal training data
 
 ## OUTPUT REQUIREMENTS
 
@@ -1182,6 +1223,177 @@ The JSON must follow this EXACT structure:
       res.json({ message: "Data seeded successfully", userId });
     } catch (err: any) {
       res.status(500).json({ message: err.message });
+    }
+  });
+
+  // ─── Journal Entries ──────────────────────────────────────────────
+
+  app.get("/api/tickers/:tickerId/journal", isAuthenticated, async (req, res) => {
+    const userId = getUserId(res);
+    const tickerId = parseInt(req.params.tickerId as string);
+    const entries = await storage.getJournalEntries(tickerId, userId);
+    res.json(entries);
+  });
+
+  app.post("/api/tickers/:tickerId/journal", isAuthenticated, async (req, res) => {
+    try {
+      const userId = getUserId(res);
+      const tickerId = parseInt(req.params.tickerId as string);
+      const { content, sourceMessageId } = req.body;
+      if (!content || typeof content !== "string") {
+        return res.status(400).json({ message: "content is required" });
+      }
+      const entry = await storage.createJournalEntry({
+        userId,
+        tickerId,
+        date: new Date().toISOString().split("T")[0],
+        content,
+        sourceMessageId: sourceMessageId || null,
+      });
+      res.status(201).json(entry);
+    } catch (err: any) {
+      res.status(400).json({ message: err.message });
+    }
+  });
+
+  app.delete("/api/journal/:id", isAuthenticated, async (req, res) => {
+    const userId = getUserId(res);
+    const id = parseInt(req.params.id as string);
+    await storage.deleteJournalEntry(id, userId);
+    res.json({ success: true });
+  });
+
+  // ─── Tactical Chat (Action Dashboard) ─────────────────────────────
+
+  app.post("/api/tickers/:tickerId/tactical-chat", isAuthenticated, upload.single("file"), async (req, res) => {
+    const tempFilePath = req.file?.path;
+    try {
+      const userId = getUserId(res);
+      const tickerId = parseInt(req.params.tickerId as string);
+      const content = typeof req.body.content === "string" ? req.body.content.trim() : "";
+
+      const ticker = await storage.getTicker(tickerId, userId);
+      if (!ticker) return res.status(404).json({ message: "Ticker not found" });
+
+      const todayStr = new Date().toISOString().split("T")[0];
+      const tickerPlaybooks = await storage.getPlaybooksByTicker(tickerId, userId);
+      const todayPlaybook = tickerPlaybooks.find(pb => pb.date === todayStr) || tickerPlaybooks[0] || null;
+
+      let playbookContext = "No active playbook available.";
+      if (todayPlaybook) {
+        const pbData = todayPlaybook.playbookData as any;
+        playbookContext = `## ACTIVE PLAYBOOK (${todayPlaybook.date})
+Bias: ${pbData.bias || "Open"}
+Macro Theme: ${pbData.macro_theme || "N/A"}
+Thesis: ${pbData.thesis || "N/A"}
+
+### Structural Zones:
+GREEN (Bullish): ${JSON.stringify(pbData.structural_zones?.bullish_green || [])}
+YELLOW (Neutral): ${JSON.stringify(pbData.structural_zones?.neutral_yellow || [])}
+RED (Bearish): ${JSON.stringify(pbData.structural_zones?.bearish_red || [])}
+
+### If/Then Scenarios:
+${(pbData.if_then_scenarios || []).map((s: any) => `- ${s.condition} → ${s.outcome}`).join("\n")}
+
+### Key Events:
+${(pbData.key_events || []).map((e: any) => `- ${e.title} at ${e.time} (${e.impact})`).join("\n")}`;
+      }
+
+      const tacticalPrompt = `You are a Tactical Trading Assistant for ${ticker.symbol} in the Action Dashboard. You provide real-time execution guidance during live trading sessions.
+
+## YOUR ROLE
+You are the trader's execution partner. When they drop a chart screenshot, you:
+1. Identify the current price using Spatial OCR (read the Y-axis)
+2. Cross-reference the price against the Active Playbook zones
+3. Tell the trader which zone they're in (Green/Yellow/Red)
+4. Match the current price to the most relevant If/Then scenario
+5. Provide actionable guidance: "You are approaching X. The Playbook says Y. Watch for Z."
+
+## TRADING GLOSSARY
+- **LAAF**: Look Above And Fail (Bull Trap)
+- **LBAF**: Look Below And Fail (Bear Trap)
+- **IB**: Initial Balance (First 60m of trade)
+- **Spike Base**: A technical level where a price "spike" began
+- **POC**: Point of Control
+- **VAH/VAL**: Value Area High / Low
+- **ONH/ONL**: Overnight High / Low
+
+## SPATIAL OCR RULES
+When a chart image is uploaded:
+1. Read the Y-axis to find the exact current price
+2. Do NOT assume or round — if it shows 6922, say 6922, not 6920
+3. Identify any visible horizontal lines, trendlines, or annotations
+4. Always prefer what you SEE in the chart over assumptions
+
+## RESPONSE FORMAT
+Keep responses concise and actionable for a live trading session:
+- **Current Price**: [from chart]
+- **Zone**: [Green/Yellow/Red based on playbook]
+- **Active Scenario**: [matching If/Then from playbook]
+- **Guidance**: [1-2 sentences of actionable advice]
+
+${playbookContext}`;
+
+      const model = genAI.getGenerativeModel({
+        model: "gemini-2.5-flash",
+        systemInstruction: tacticalPrompt,
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 4096,
+        },
+      });
+
+      const parts: any[] = [];
+
+      if (req.file) {
+        try {
+          const mimeType = inferMimeType(req.file.originalname, req.file.mimetype);
+          const uploadResult = await fileManager.uploadFile(req.file.path, {
+            mimeType,
+            displayName: req.file.originalname,
+          });
+
+          let file = uploadResult.file;
+          let attempts = 0;
+          while (file.state === FileState.PROCESSING && attempts < 60) {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            const result = await fileManager.getFile(file.name);
+            file = result;
+            attempts++;
+          }
+
+          if (file.state === FileState.ACTIVE) {
+            parts.push({ fileData: { mimeType: file.mimeType, fileUri: file.uri } });
+          }
+        } catch (fileErr: any) {
+          try {
+            const chatMimeType = inferMimeType(req.file!.originalname, req.file!.mimetype);
+            if (chatMimeType.startsWith("image/")) {
+              const imageData = fs.readFileSync(req.file!.path);
+              parts.push({ inlineData: { mimeType: chatMimeType, data: imageData.toString("base64") } });
+            } else {
+              const fileContent = await extractTextFromFile(req.file!.path, chatMimeType);
+              if (fileContent) parts.push({ text: `[Document content]:\n\n${fileContent}` });
+            }
+          } catch {}
+        }
+      }
+
+      parts.push({ text: content || "Analyze this chart screenshot. What price am I at and what does the playbook say?" });
+
+      await storage.createChatMessage({ userId, tickerId, role: "user", content: content || "[Chart Screenshot uploaded]" });
+
+      const result = await model.generateContent({ contents: [{ role: "user", parts }] });
+      const aiText = result.response.text();
+
+      const aiMsg = await storage.createChatMessage({ userId, tickerId, role: "assistant", content: aiText });
+
+      res.json({ userMessage: { role: "user", content }, aiMessage: aiMsg });
+    } catch (err: any) {
+      console.error("Tactical chat error:", err);
+      res.status(500).json({ message: err.message || "Tactical analysis failed" });
+    } finally {
+      if (tempFilePath) try { fs.unlinkSync(tempFilePath); } catch {}
     }
   });
 

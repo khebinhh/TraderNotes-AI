@@ -239,3 +239,44 @@ const FUTURES_SYMBOLS = ["ES1!", "NQ1!"];
 export function isFuturesSymbol(symbol: string): boolean {
   return FUTURES_SYMBOLS.includes(symbol);
 }
+
+export interface JournalEntry {
+  id: number;
+  userId: string | null;
+  tickerId: number | null;
+  date: string;
+  content: string;
+  sourceMessageId: number | null;
+  createdAt: string;
+}
+
+export async function fetchJournalEntries(tickerId: number): Promise<JournalEntry[]> {
+  const res = await fetch(`/api/tickers/${tickerId}/journal`, { credentials: "include" });
+  if (!res.ok) throw new Error("Failed to fetch journal");
+  return res.json();
+}
+
+export async function createJournalEntry(tickerId: number, content: string, sourceMessageId?: number): Promise<JournalEntry> {
+  const res = await apiRequest("POST", `/api/tickers/${tickerId}/journal`, { content, sourceMessageId });
+  return res.json();
+}
+
+export async function deleteJournalEntry(id: number): Promise<void> {
+  await apiRequest("DELETE", `/api/journal/${id}`);
+}
+
+export async function sendTacticalChat(tickerId: number, content: string, file?: File): Promise<{ userMessage: ChatMsg; aiMessage: ChatMsg }> {
+  const formData = new FormData();
+  formData.append("content", content);
+  if (file) formData.append("file", file);
+  const res = await fetch(`/api/tickers/${tickerId}/tactical-chat`, {
+    method: "POST",
+    body: formData,
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: "Tactical chat failed" }));
+    throw new Error(err.message);
+  }
+  return res.json();
+}

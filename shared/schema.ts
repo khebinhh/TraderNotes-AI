@@ -80,6 +80,16 @@ export const playbooks = pgTable("playbooks", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const journalEntries = pgTable("journal_entries", {
+  id: serial("id").primaryKey(),
+  userId: varchar("user_id").references(() => users.id, { onDelete: "cascade" }),
+  tickerId: integer("ticker_id").references(() => tickers.id, { onDelete: "cascade" }),
+  date: date("date").notNull().defaultNow(),
+  content: text("content").notNull(),
+  sourceMessageId: integer("source_message_id"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const insertTickerSchema = createInsertSchema(tickers).omit({ id: true });
 export const insertNoteSchema = createInsertSchema(notes).omit({ id: true, createdAt: true });
 export const insertCalculatedLevelSchema = createInsertSchema(calculatedLevels).omit({ id: true });
@@ -88,6 +98,7 @@ export const insertChecklistItemSchema = createInsertSchema(checklistItems).omit
 export const insertEventSchema = createInsertSchema(events).omit({ id: true });
 export const insertChatMessageSchema = createInsertSchema(chatMessages).omit({ id: true, createdAt: true });
 export const insertPlaybookSchema = createInsertSchema(playbooks).omit({ id: true, createdAt: true });
+export const insertJournalEntrySchema = createInsertSchema(journalEntries).omit({ id: true, createdAt: true });
 
 export type Ticker = typeof tickers.$inferSelect;
 export type InsertTicker = z.infer<typeof insertTickerSchema>;
@@ -105,3 +116,5 @@ export type ChatMessage = typeof chatMessages.$inferSelect;
 export type InsertChatMessage = z.infer<typeof insertChatMessageSchema>;
 export type Playbook = typeof playbooks.$inferSelect;
 export type InsertPlaybook = z.infer<typeof insertPlaybookSchema>;
+export type JournalEntry = typeof journalEntries.$inferSelect;
+export type InsertJournalEntry = z.infer<typeof insertJournalEntrySchema>;

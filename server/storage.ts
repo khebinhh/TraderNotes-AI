@@ -1,7 +1,7 @@
 import { eq, desc, and } from "drizzle-orm";
 import { db } from "./db";
 import {
-  tickers, notes, calculatedLevels, dailyChecklists, checklistItems, events, chatMessages, playbooks,
+  tickers, notes, calculatedLevels, dailyChecklists, checklistItems, events, chatMessages, playbooks, journalEntries,
   type Ticker, type InsertTicker,
   type Note, type InsertNote,
   type CalculatedLevel, type InsertCalculatedLevel,
@@ -10,6 +10,7 @@ import {
   type Event, type InsertEvent,
   type ChatMessage, type InsertChatMessage,
   type Playbook, type InsertPlaybook,
+  type JournalEntry, type InsertJournalEntry,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -53,6 +54,10 @@ export interface IStorage {
   getPlaybook(id: number, userId: string): Promise<Playbook | undefined>;
   createPlaybook(playbook: InsertPlaybook): Promise<Playbook>;
   updatePlaybookReview(id: number, userId: string, review: string): Promise<Playbook | undefined>;
+
+  getJournalEntries(tickerId: number, userId: string): Promise<JournalEntry[]>;
+  createJournalEntry(entry: InsertJournalEntry): Promise<JournalEntry>;
+  deleteJournalEntry(id: number, userId: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -222,6 +227,21 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(playbooks.id, id), eq(playbooks.userId, userId)))
       .returning();
     return updated;
+  }
+
+  async getJournalEntries(tickerId: number, userId: string): Promise<JournalEntry[]> {
+    return db.select().from(journalEntries)
+      .where(and(eq(journalEntries.tickerId, tickerId), eq(journalEntries.userId, userId)))
+      .orderBy(desc(journalEntries.createdAt));
+  }
+
+  async createJournalEntry(entry: InsertJournalEntry): Promise<JournalEntry> {
+    const [created] = await db.insert(journalEntries).values(entry).returning();
+    return created;
+  }
+
+  async deleteJournalEntry(id: number, userId: string): Promise<void> {
+    await db.delete(journalEntries).where(and(eq(journalEntries.id, id), eq(journalEntries.userId, userId)));
   }
 }
 

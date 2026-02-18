@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Bot, Paperclip, Sparkles, X, FileText, Image as ImageIcon, Calendar, ChevronRight, BarChart3, BookOpen, Loader2 } from "lucide-react";
+import { Send, Bot, Paperclip, Sparkles, X, FileText, Image as ImageIcon, Calendar, ChevronRight, BarChart3, BookOpen, Loader2, Pin, MessageSquare } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -9,7 +9,8 @@ import { Badge } from "@/components/ui/badge";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchChatByTicker, sendChatMessage, analyzeDocument, fetchPlaybooks, updatePlaybookReview,
-  type FullNote, type ChatMsg, type TickerData, type NoteData, type Playbook
+  fetchJournalEntries, createJournalEntry, deleteJournalEntry,
+  type FullNote, type ChatMsg, type TickerData, type NoteData, type Playbook, type JournalEntry
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { format } from "date-fns";
@@ -115,6 +116,29 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
     },
   });
 
+  const { data: journalEntries = [] } = useQuery<JournalEntry[]>({
+    queryKey: ["/api/tickers", activeTicker?.id, "journal"],
+    queryFn: () => fetchJournalEntries(activeTicker!.id),
+    enabled: !!activeTicker,
+  });
+
+  const pinMutation = useMutation({
+    mutationFn: ({ content, sourceMessageId }: { content: string; sourceMessageId?: number }) =>
+      createJournalEntry(activeTicker!.id, content, sourceMessageId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/tickers", activeTicker?.id, "journal"] });
+      toast({ title: "Pinned to Journal", description: "AI insight saved to your Learning Journal" });
+    },
+  });
+
+  const unpinMutation = useMutation({
+    mutationFn: (id: number) => deleteJournalEntry(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/tickers", activeTicker?.id, "journal"] });
+      toast({ title: "Removed from Journal" });
+    },
+  });
+
   useEffect(() => {
     if (scrollRef.current && !activePlaybook) {
       const scrollContainer = scrollRef.current.querySelector("[data-radix-scroll-area-viewport]");
@@ -147,11 +171,19 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
     setFilePreview(null);
   };
 
-  const handleSend = () => {
+  const handleSend = (mode?: "playbook" | "chat") => {
     if ((!input.trim() && !attachedFile) || !activeTicker) return;
     if (chatMutation.isPending || analyzeMutation.isPending) return;
 
-    if (attachedFile) {
+    if (attachedFile && mode === "playbook") {
+      analyzeMutation.mutate({ file: attachedFile, content: input || undefined });
+      setInput("");
+      removeFile();
+    } else if (attachedFile && mode === "chat") {
+      chatMutation.mutate({ content: input || `Analyze this file: ${attachedFile.name}`, file: attachedFile });
+      setInput("");
+      removeFile();
+    } else if (attachedFile) {
       analyzeMutation.mutate({ file: attachedFile, content: input || undefined });
       setInput("");
       removeFile();
@@ -234,8 +266,44 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
         )}
 
         {msg.createdAt && (
-          <div className="text-[10px] opacity-40 mt-2 font-mono text-right">
-            {new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+          <div className="flex items-center justify-between mt-2">
+            <div className="text-[10px] opacity-40 font-mono">
+              {new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+            </div>
+            {isAssistant && (
+              (() => {
+                const isPinned = journalEntries.some(j => j.sourceMessageId === msg.id);
+                const pinnedEntry = journalEntries.find(j => j.sourceMessageId === msg.id);
+                return (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          onClick={() => {
+                            if (isPinned && pinnedEntry) {
+                              unpinMutation.mutate(pinnedEntry.id);
+                            } else {
+                              pinMutation.mutate({ content: msg.content, sourceMessageId: msg.id });
+                            }
+                          }}
+                          className={cn(
+                            "flex items-center gap-1 text-[10px] font-mono transition-all px-1.5 py-0.5 rounded",
+                            isPinned
+                              ? "text-amber-400 bg-amber-500/10"
+                              : "text-muted-foreground/40 hover:text-amber-400 hover:bg-amber-500/10"
+                          )}
+                          data-testid={`button-pin-${msg.id}`}
+                        >
+                          <Pin className="h-3 w-3" />
+                          {isPinned ? "Pinned" : "Pin"}
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>{isPinned ? "Remove from Learning Journal" : "Pin to Learning Journal"}</TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                );
+              })()
+            )}
           </div>
         )}
       </>
@@ -295,6 +363,26 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
                     </button>
                   );
                 })}
+              </div>
+            )}
+
+            {journalEntries.length > 0 && (
+              <div className="mb-2">
+                <div className="px-2 py-1.5 text-[10px] font-mono text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                  <Pin className="h-3 w-3" />
+                  Learning Journal
+                </div>
+                {journalEntries.slice(0, 5).map((entry) => (
+                  <div
+                    key={entry.id}
+                    className="w-full text-left px-3 py-2 rounded-lg text-sm hover:bg-amber-500/5 text-muted-foreground"
+                  >
+                    <p className="text-[11px] line-clamp-2">{entry.content.slice(0, 100)}...</p>
+                    <p className="text-[10px] text-muted-foreground/60 mt-0.5">
+                      {format(new Date(entry.createdAt), "MMM d, h:mm a")}
+                    </p>
+                  </div>
+                ))}
               </div>
             )}
 
@@ -507,8 +595,8 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
                         <X className="h-3.5 w-3.5" />
                       </button>
                     </Badge>
-                    <Badge variant="outline" className="text-[9px] border-emerald-500/30 text-emerald-400">
-                      Will generate Playbook
+                    <Badge variant="outline" className="text-[9px] border-amber-500/30 text-amber-400">
+                      Choose action below
                     </Badge>
                   </div>
                 )}
@@ -559,25 +647,42 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
                         </Tooltip>
                       </TooltipProvider>
                     </div>
-                    <Button
-                      size="sm"
-                      onClick={handleSend}
-                      disabled={(!input.trim() && !attachedFile) || isProcessing || !activeTicker}
-                      className="h-8 px-4 text-xs bg-primary text-primary-foreground hover:bg-primary/90 font-bold tracking-wide rounded-lg"
-                      data-testid="button-send"
-                    >
-                      {attachedFile ? (
-                        <>
-                          <BookOpen className="mr-2 h-3.5 w-3.5" />
+                    {attachedFile ? (
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          onClick={() => handleSend("playbook")}
+                          disabled={isProcessing || !activeTicker}
+                          className="h-8 px-3 text-xs bg-emerald-600 text-white hover:bg-emerald-700 font-bold tracking-wide rounded-lg"
+                          data-testid="button-generate-playbook"
+                        >
+                          <BookOpen className="mr-1.5 h-3.5 w-3.5" />
                           GENERATE PLAYBOOK
-                        </>
-                      ) : (
-                        <>
-                          <Send className="mr-2 h-3.5 w-3.5" />
-                          SEND
-                        </>
-                      )}
-                    </Button>
+                        </Button>
+                        <Button
+                          size="sm"
+                          onClick={() => handleSend("chat")}
+                          disabled={isProcessing || !activeTicker}
+                          variant="outline"
+                          className="h-8 px-3 text-xs font-bold tracking-wide rounded-lg border-blue-500/30 text-blue-400 hover:bg-blue-500/10"
+                          data-testid="button-tactical-research"
+                        >
+                          <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+                          TACTICAL RESEARCH
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        size="sm"
+                        onClick={() => handleSend()}
+                        disabled={!input.trim() || isProcessing || !activeTicker}
+                        className="h-8 px-4 text-xs bg-primary text-primary-foreground hover:bg-primary/90 font-bold tracking-wide rounded-lg"
+                        data-testid="button-send"
+                      >
+                        <Send className="mr-2 h-3.5 w-3.5" />
+                        SEND
+                      </Button>
+                    )}
                   </div>
                 </div>
               </div>
