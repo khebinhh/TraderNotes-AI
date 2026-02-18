@@ -229,7 +229,7 @@ export const LiveChart = forwardRef<LiveChartHandle, LiveChartProps>(
           autosize: true,
           symbol: tvSymbol,
           interval: "60",
-          timezone: "Etc/UTC",
+          timezone: "America/New_York",
           theme: "dark",
           style: "1",
           locale: "en",

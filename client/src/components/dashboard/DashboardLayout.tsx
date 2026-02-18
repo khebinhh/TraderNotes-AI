@@ -74,8 +74,14 @@ export function DashboardLayout() {
   };
 
   const [clockTime, setClockTime] = useState(new Date().toLocaleTimeString());
+  const [nyTime, setNyTime] = useState(
+    new Date().toLocaleTimeString("en-US", { timeZone: "America/New_York" })
+  );
   useEffect(() => {
-    const interval = setInterval(() => setClockTime(new Date().toLocaleTimeString()), 1000);
+    const interval = setInterval(() => {
+      setClockTime(new Date().toLocaleTimeString());
+      setNyTime(new Date().toLocaleTimeString("en-US", { timeZone: "America/New_York" }));
+    }, 1000);
     return () => clearInterval(interval);
   }, []);
 
@@ -136,7 +142,17 @@ export function DashboardLayout() {
             <span className="w-2 h-2 rounded-full bg-green-500" />
             <span data-testid="status-system">ONLINE</span>
           </div>
-          <div data-testid="text-clock">{clockTime}</div>
+          <div className="flex items-center gap-3" data-testid="text-clock">
+            <div className="flex flex-col items-end leading-none">
+              <span className="text-[10px] text-muted-foreground/60">LOCAL</span>
+              <span>{clockTime}</span>
+            </div>
+            <div className="w-px h-5 bg-border" />
+            <div className="flex flex-col items-end leading-none">
+              <span className="text-[10px] text-amber-400/80">NYC</span>
+              <span className="text-amber-400" data-testid="text-ny-clock">{nyTime}</span>
+            </div>
+          </div>
           {user && (
             <div className="flex items-center gap-3 ml-2 pl-3 border-l border-border">
               {user.profileImageUrl && (
