@@ -1,7 +1,7 @@
 import { eq, desc, and } from "drizzle-orm";
 import { db } from "./db";
 import {
-  tickers, notes, calculatedLevels, dailyChecklists, checklistItems, events, chatMessages, playbooks, journalEntries,
+  tickers, notes, calculatedLevels, dailyChecklists, checklistItems, events, chatMessages, playbooks, journalEntries, userWorkspaces,
   type Ticker, type InsertTicker,
   type Note, type InsertNote,
   type CalculatedLevel, type InsertCalculatedLevel,
@@ -11,6 +11,7 @@ import {
   type ChatMessage, type InsertChatMessage,
   type Playbook, type InsertPlaybook,
   type JournalEntry, type InsertJournalEntry,
+  type UserWorkspace,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -58,6 +59,9 @@ export interface IStorage {
   getJournalEntries(tickerId: number, userId: string): Promise<JournalEntry[]>;
   createJournalEntry(entry: InsertJournalEntry): Promise<JournalEntry>;
   deleteJournalEntry(id: number, userId: string): Promise<void>;
+
+  getWorkspace(userId: string): Promise<UserWorkspace | undefined>;
+  saveWorkspace(userId: string, activeTickers: number[], lastActiveTicker: number | null): Promise<UserWorkspace>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -242,6 +246,28 @@ export class DatabaseStorage implements IStorage {
 
   async deleteJournalEntry(id: number, userId: string): Promise<void> {
     await db.delete(journalEntries).where(and(eq(journalEntries.id, id), eq(journalEntries.userId, userId)));
+  }
+
+  async getWorkspace(userId: string): Promise<UserWorkspace | undefined> {
+    const [ws] = await db.select().from(userWorkspaces).where(eq(userWorkspaces.userId, userId));
+    return ws;
+  }
+
+  async saveWorkspace(userId: string, activeTickers: number[], lastActiveTicker: number | null): Promise<UserWorkspace> {
+    const existing = await this.getWorkspace(userId);
+    if (existing) {
+      const [updated] = await db.update(userWorkspaces)
+        .set({ activeTickers, lastActiveTicker })
+        .where(eq(userWorkspaces.userId, userId))
+        .returning();
+      return updated;
+    }
+    const [created] = await db.insert(userWorkspaces).values({
+      userId,
+      activeTickers,
+      lastActiveTicker,
+    }).returning();
+    return created;
   }
 }
 

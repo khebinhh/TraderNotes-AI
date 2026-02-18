@@ -1,9 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { TickerTabs } from "./TickerTabs";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { TickerTabs, EmptyWorkspace, getTickerColor, inferExchange } from "./TickerTabs";
 import { StrategyRoom } from "./StrategyRoom";
 import { ActionDashboard, type ActionDashboardHandle } from "./ActionDashboard";
-import { fetchTickers, fetchNotesByTicker, fetchFullNote, fetchPriceRatio, seedData, isFuturesSymbol, type TickerData, type NoteData, type FullNote, type PriceRatioData } from "@/lib/api";
+import {
+  fetchTickers, fetchNotesByTicker, fetchFullNote, fetchPriceRatio, seedData,
+  isFuturesSymbol, createTicker, deleteTicker, fetchWorkspace, saveWorkspace,
+  type TickerData, type NoteData, type FullNote, type PriceRatioData
+} from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
 import { LogOut, BookOpen, BarChart3 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
@@ -17,26 +21,131 @@ export function DashboardLayout() {
   const actionDashboardRef = useRef<ActionDashboardHandle>(null);
   const pendingLevelRef = useRef<{ price: number; label: string; color: string } | null>(null);
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [selectedTickerId, setSelectedTickerId] = useState<number | null>(null);
   const [selectedNoteId, setSelectedNoteId] = useState<number | null>(null);
   const [seeded, setSeeded] = useState(false);
+  const [workspaceTickerIds, setWorkspaceTickerIds] = useState<number[]>([]);
+  const [workspaceLoaded, setWorkspaceLoaded] = useState(false);
 
   useEffect(() => {
     seedData().then(() => setSeeded(true)).catch(() => setSeeded(true));
   }, []);
 
-  const { data: tickersList = [], isLoading: tickersLoading } = useQuery<TickerData[]>({
+  const { data: allTickers = [], isLoading: tickersLoading } = useQuery<TickerData[]>({
     queryKey: ["/api/tickers"],
     enabled: seeded,
   });
 
-  useEffect(() => {
-    if (tickersList.length > 0 && selectedTickerId === null) {
-      setSelectedTickerId(tickersList[0].id);
-    }
-  }, [tickersList, selectedTickerId]);
+  const { data: workspace } = useQuery({
+    queryKey: ["/api/workspace"],
+    queryFn: fetchWorkspace,
+    enabled: seeded,
+  });
 
-  const activeTicker = tickersList.find((t) => t.id === selectedTickerId) || null;
+  useEffect(() => {
+    if (!workspace || workspaceLoaded || allTickers.length === 0) return;
+
+    if (workspace.activeTickers && workspace.activeTickers.length > 0) {
+      const validIds = workspace.activeTickers.filter(id => allTickers.some(t => t.id === id));
+      if (validIds.length > 0) {
+        setWorkspaceTickerIds(validIds);
+        const lastActive = workspace.lastActiveTicker && validIds.includes(workspace.lastActiveTicker)
+          ? workspace.lastActiveTicker
+          : validIds[0];
+        setSelectedTickerId(lastActive);
+        setWorkspaceLoaded(true);
+        return;
+      }
+    }
+
+    const defaultIds = allTickers.map(t => t.id);
+    setWorkspaceTickerIds(defaultIds);
+    if (defaultIds.length > 0) setSelectedTickerId(defaultIds[0]);
+    persistWorkspace(defaultIds, defaultIds[0] || null);
+    setWorkspaceLoaded(true);
+  }, [workspace, allTickers, workspaceLoaded]);
+
+  const workspaceTickers = allTickers.filter(t => workspaceTickerIds.includes(t.id));
+
+  const persistWorkspace = useCallback((tickerIds: number[], activeId: number | null) => {
+    saveWorkspace({ activeTickers: tickerIds, lastActiveTicker: activeId }).catch(() => {});
+  }, []);
+
+  const addTickerMutation = useMutation({
+    mutationFn: async (symbol: string) => {
+      const existing = allTickers.find(t => t.symbol.toUpperCase() === symbol.toUpperCase());
+      if (existing) {
+        if (workspaceTickerIds.includes(existing.id)) {
+          setSelectedTickerId(existing.id);
+          return existing;
+        }
+        const newIds = [...workspaceTickerIds, existing.id];
+        setWorkspaceTickerIds(newIds);
+        setSelectedTickerId(existing.id);
+        persistWorkspace(newIds, existing.id);
+        return existing;
+      }
+
+      const displayName = symbol.replace(/[0-9!]/g, "");
+      const exchange = inferExchange(symbol);
+      const color = getTickerColor(symbol);
+      const created = await createTicker({ symbol, displayName, exchange, color });
+      return created;
+    },
+    onSuccess: (ticker) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/tickers"] });
+      if (!workspaceTickerIds.includes(ticker.id)) {
+        const newIds = [...workspaceTickerIds, ticker.id];
+        setWorkspaceTickerIds(newIds);
+        setSelectedTickerId(ticker.id);
+        persistWorkspace(newIds, ticker.id);
+      }
+      toast({ title: `${ticker.symbol} workspace opened` });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Failed to add ticker", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const removeTickerMutation = useMutation({
+    mutationFn: async (tickerId: number) => {
+      const newIds = workspaceTickerIds.filter(id => id !== tickerId);
+      setWorkspaceTickerIds(newIds);
+
+      if (selectedTickerId === tickerId) {
+        const idx = workspaceTickerIds.indexOf(tickerId);
+        const nextId = newIds[Math.min(idx, newIds.length - 1)] || null;
+        setSelectedTickerId(nextId);
+        setSelectedNoteId(null);
+        persistWorkspace(newIds, nextId);
+      } else {
+        persistWorkspace(newIds, selectedTickerId);
+      }
+
+      return tickerId;
+    },
+    onSuccess: (tickerId) => {
+      const ticker = allTickers.find(t => t.id === tickerId);
+      toast({ title: `${ticker?.symbol || "Ticker"} tab closed` });
+    },
+  });
+
+  const handleTickerChange = (tickerId: number) => {
+    setSelectedTickerId(tickerId);
+    setSelectedNoteId(null);
+    persistWorkspace(workspaceTickerIds, tickerId);
+  };
+
+  const handleAddTicker = (symbol: string) => {
+    addTickerMutation.mutate(symbol);
+  };
+
+  const handleRemoveTicker = (tickerId: number) => {
+    removeTickerMutation.mutate(tickerId);
+  };
+
+  const activeTicker = allTickers.find((t) => t.id === selectedTickerId) || null;
 
   const { data: notes = [] } = useQuery<NoteData[]>({
     queryKey: ["/api/tickers", selectedTickerId, "notes"],
@@ -68,11 +177,6 @@ export function DashboardLayout() {
     staleTime: 5 * 60 * 1000,
   });
 
-  const handleTickerChange = (tickerId: number) => {
-    setSelectedTickerId(tickerId);
-    setSelectedNoteId(null);
-  };
-
   const [clockTime, setClockTime] = useState(new Date().toLocaleTimeString());
   const [nyTime, setNyTime] = useState(
     new Date().toLocaleTimeString("en-US", { timeZone: "America/New_York" })
@@ -95,6 +199,8 @@ export function DashboardLayout() {
       </div>
     );
   }
+
+  const showEmptyWorkspace = workspaceLoaded && workspaceTickers.length === 0;
 
   return (
     <div className="h-screen w-full bg-background text-foreground overflow-hidden flex flex-col">
@@ -175,13 +281,18 @@ export function DashboardLayout() {
       </header>
 
       <TickerTabs
-        tickers={tickersList}
+        tickers={workspaceTickers}
         activeTickerId={selectedTickerId}
         onSelectTicker={handleTickerChange}
+        onRemoveTicker={handleRemoveTicker}
+        onAddTicker={handleAddTicker}
+        isAdding={addTickerMutation.isPending}
       />
 
       <div className="flex-1 overflow-hidden">
-        {roomMode === "strategy" ? (
+        {showEmptyWorkspace ? (
+          <EmptyWorkspace onAddTicker={handleAddTicker} />
+        ) : roomMode === "strategy" ? (
           <StrategyRoom
             activeTicker={activeTicker}
             activeNote={activeNote || null}
@@ -196,6 +307,7 @@ export function DashboardLayout() {
                 description: `${label} at ${price}`,
               });
             }}
+            onAddTicker={handleAddTicker}
           />
         ) : (
           <ActionDashboard

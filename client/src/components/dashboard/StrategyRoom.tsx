@@ -55,9 +55,10 @@ interface StrategyRoomProps {
   selectedNoteId: number | null;
   onSelectNote: (id: number) => void;
   onAddToChart?: (price: number, label: string, color: string) => void;
+  onAddTicker?: (symbol: string) => void;
 }
 
-export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, onSelectNote, onAddToChart }: StrategyRoomProps) {
+export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, onSelectNote, onAddToChart, onAddTicker }: StrategyRoomProps) {
   const [input, setInput] = useState("");
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const [filePreviews, setFilePreviews] = useState<Map<string, string>>(new Map());
@@ -253,7 +254,11 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
   const renderMessageContent = (msg: ChatMsg) => {
     const isAssistant = msg.role === "assistant";
     const levels = isAssistant ? extractLevelsFromMessage(msg.content) : [];
-    const cleanContent = msg.content.replace(/```json[\s\S]*?```/g, "").trim();
+    const syncMatches = isAssistant ? Array.from(msg.content.matchAll(/\*{0,2}\[SYNC_SUGGEST:\s*([A-Z0-9!.]+)\]\*{0,2}/g)) : [];
+    const cleanContent = msg.content
+      .replace(/```json[\s\S]*?```/g, "")
+      .replace(/\*{0,2}\[SYNC_SUGGEST:\s*[A-Z0-9!.]+\]\*{0,2}/g, "")
+      .trim();
 
     return (
       <>
@@ -266,6 +271,27 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
             }} />
           ))}
         </div>
+
+        {isAssistant && syncMatches.length > 0 && onAddTicker && (
+          <div className="mt-3 pt-3 border-t border-border/30">
+            <div className="text-[10px] uppercase text-muted-foreground font-mono tracking-wider mb-2">
+              Detected Tickers
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {syncMatches.map((match, i) => (
+                <button
+                  key={i}
+                  onClick={() => onAddTicker(match[1])}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-mono font-bold border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 transition-all hover:scale-105 active:scale-95"
+                  data-testid={`button-sync-add-${match[1]}`}
+                >
+                  <Sparkles className="h-3 w-3" />
+                  Open {match[1]} Workspace
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {isAssistant && levels.length > 0 && (
           <div className="mt-3 pt-3 border-t border-border/30">

@@ -85,6 +85,14 @@ export async function registerRoutes(
       const userId = getUserId(res);
       const parsed = insertTickerSchema.parse({ ...req.body, userId });
       const created = await storage.createTicker(parsed);
+
+      await storage.createChatMessage({
+        userId,
+        tickerId: created.id,
+        role: "assistant",
+        content: `Welcome to the **${created.symbol}** workspace. I don't see a playbook for this ticker yet. Upload a report or ask me a question to get started.`,
+      });
+
       res.status(201).json(created);
     } catch (err: any) {
       res.status(400).json({ message: err.message });
@@ -96,6 +104,23 @@ export async function registerRoutes(
     const id = parseInt(req.params.id as string);
     await storage.deleteTicker(id, userId);
     res.json({ success: true });
+  });
+
+  app.get("/api/workspace", isAuthenticated, async (req, res) => {
+    const userId = getUserId(res);
+    const workspace = await storage.getWorkspace(userId);
+    res.json(workspace || { activeTickers: [], lastActiveTicker: null });
+  });
+
+  app.put("/api/workspace", isAuthenticated, async (req, res) => {
+    try {
+      const userId = getUserId(res);
+      const { activeTickers, lastActiveTicker } = req.body;
+      const workspace = await storage.saveWorkspace(userId, activeTickers || [], lastActiveTicker ?? null);
+      res.json(workspace);
+    } catch (err: any) {
+      res.status(400).json({ message: err.message });
+    }
   });
 
   // ─── Notes (scoped by ticker) ────────────────────────────────
@@ -530,7 +555,16 @@ ${contextInfo}
 - Use markdown formatting for clarity (bold for key levels, bullet points for analysis)
 - When discussing price levels, use ONLY levels from the trader's stored notes, not your internal knowledge
 - When the user asks "What should I look for today?", use trading terms naturally in context
-- Do NOT include the JSON block when no file is uploaded`;
+- Do NOT include the JSON block when no file is uploaded
+
+## TICKER SYNC — DETECTING NEW INSTRUMENTS
+
+When analyzing an uploaded document, if you detect references to a DIFFERENT ticker/instrument that the trader does NOT currently have in their workspace, suggest opening a new workspace tab for it.
+
+Format the suggestion as: **[SYNC_SUGGEST: SYMBOL]** — e.g., "I notice this document references AAPL. **[SYNC_SUGGEST: AAPL]** Would you like me to open an AAPL workspace?"
+
+Common ticker formats to detect: AAPL, TSLA, NVDA, AMZN, SPY, QQQ, ES1!, NQ1!, BTCUSD, etc.
+Only suggest tickers that are NOT "${ticker.symbol}" (the current workspace). Do not suggest the ticker that is already active.`;
 
       const model = genAI.getGenerativeModel({
         model: "gemini-2.5-flash",
@@ -1252,6 +1286,8 @@ When multiple files are uploaded simultaneously, you must SYNTHESIZE a unified p
       await storage.createChatMessage({ userId, tickerId: btc.id, role: "assistant", content: "Welcome to the **BTCUSD** workspace. I'm your trading mentor for Bitcoin. Ask me about your levels, game plan, or past entries." });
       await storage.createChatMessage({ userId, tickerId: es.id, role: "assistant", content: "Welcome to the **ES1!** workspace. I'm your trading mentor for S&P 500 Futures. Ask me about your levels, game plan, or past entries." });
       await storage.createChatMessage({ userId, tickerId: nq.id, role: "assistant", content: "Welcome to the **NQ1!** workspace. I'm your trading mentor for Nasdaq Futures. Ask me about your levels, game plan, or past entries." });
+
+      await storage.saveWorkspace(userId, [btc.id, es.id, nq.id], btc.id);
 
       res.json({ message: "Data seeded successfully", userId });
     } catch (err: any) {

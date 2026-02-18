@@ -87,6 +87,26 @@ export async function createTicker(data: { symbol: string; displayName: string; 
   return res.json();
 }
 
+export async function deleteTicker(id: number): Promise<void> {
+  await apiRequest("DELETE", `/api/tickers/${id}`);
+}
+
+export interface WorkspaceData {
+  activeTickers: number[];
+  lastActiveTicker: number | null;
+}
+
+export async function fetchWorkspace(): Promise<WorkspaceData> {
+  const res = await fetch("/api/workspace", { credentials: "include" });
+  if (!res.ok) throw new Error("Failed to fetch workspace");
+  return res.json();
+}
+
+export async function saveWorkspace(data: WorkspaceData): Promise<WorkspaceData> {
+  const res = await apiRequest("PUT", "/api/workspace", data);
+  return res.json();
+}
+
 export async function fetchNotesByTicker(tickerId: number): Promise<NoteData[]> {
   const res = await fetch(`/api/tickers/${tickerId}/notes`, { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch notes");

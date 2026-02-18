@@ -90,6 +90,13 @@ export const journalEntries = pgTable("journal_entries", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const userWorkspaces = pgTable("user_workspaces", {
+  id: serial("id").primaryKey(),
+  userId: varchar("user_id").references(() => users.id, { onDelete: "cascade" }).unique(),
+  activeTickers: jsonb("active_tickers").$type<number[]>().default([]),
+  lastActiveTicker: integer("last_active_ticker"),
+});
+
 export const insertTickerSchema = createInsertSchema(tickers).omit({ id: true });
 export const insertNoteSchema = createInsertSchema(notes).omit({ id: true, createdAt: true });
 export const insertCalculatedLevelSchema = createInsertSchema(calculatedLevels).omit({ id: true });
@@ -118,3 +125,4 @@ export type Playbook = typeof playbooks.$inferSelect;
 export type InsertPlaybook = z.infer<typeof insertPlaybookSchema>;
 export type JournalEntry = typeof journalEntries.$inferSelect;
 export type InsertJournalEntry = z.infer<typeof insertJournalEntrySchema>;
+export type UserWorkspace = typeof userWorkspaces.$inferSelect;
