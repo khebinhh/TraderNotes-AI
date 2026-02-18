@@ -428,6 +428,27 @@ Part 2: ALWAYS append a \`\`\`tactical_briefing JSON block at the very end. This
 Part 1: Provide thoughtful responses (3-4 paragraphs) referencing the trader's stored levels and game plan.
 Part 2: When discussing specific price levels or giving a directional view, append a \`\`\`tactical_briefing block at the very end. For simple conversational replies, skip the JSON entirely.
 
+### MODE 3: POST-MARKET REVIEW (recap/review/EOD request)
+
+Trigger: When the user asks for a "recap", "review", "end of day", "EOD", "what happened today", "how did we do", "summary of today", "post-market", "closing review", "daily achievement", or uploads a chart with a closing timestamp (after 4:00 PM EST / 16:00 ET).
+
+In this mode you are an AUDITOR, not a planner. Your job is to compare the MORNING PLAYBOOK against REALITY:
+
+Part 1: Write a narrative recap (2-3 paragraphs):
+- What the morning plan predicted vs what actually happened
+- Which levels held, which broke, and why
+- Emotional/volatility assessment of the session
+- What the close means for tomorrow
+
+Part 2: ALWAYS append a \`\`\`tactical_briefing block at the very end with a special "postMarketRecap" key included. The UI renders this as a Post-Market Achievement dashboard.
+
+The audit logic:
+1. Compare the Closing Price (from the chart screenshot or stated by the trader) to the Morning Playbook Levels stored in context
+2. Identify which If/Then scenarios actually triggered
+3. Determine which levels were defended (held) vs lost (broken)
+4. Extract "Closing Remarks" — e.g., PharmD's Discord messages about "wen moon to wen gulag" — to capture the emotional sentiment of the floor
+5. Grade the session outcome
+
 ## TACTICAL_BRIEFING JSON FORMAT
 
 This block goes at the VERY END of your response. The UI renders it as visual widgets — the user never sees raw JSON:
@@ -487,6 +508,24 @@ This block goes at the VERY END of your response. The UI renders it as visual wi
         "outcome": "THEN target 6966-6988"
       }
     ]
+  },
+
+  // ONLY include "postMarketRecap" when in MODE 3 (Post-Market Review):
+  "postMarketRecap": {
+    "sessionOutcome": "STABILIZED" | "TREND_CONTINUATION" | "FAILED_BREAKOUT" | "REVERSAL" | "CHOP",
+    "closingPrice": 6892,
+    "morningBias": "bearish" | "bullish" | "neutral",
+    "levelsDefended": [
+      { "price": 6871, "label": "Core Bot — held as floor", "status": "defended" }
+    ],
+    "levelsLost": [
+      { "price": 6902, "label": "P-Breakdown Flip Zone — rejected and lost", "status": "lost" }
+    ],
+    "scenariosTriggered": [
+      { "scenario": "IF 6898-6902 rejected, THEN short targeting 6873", "result": "Partially triggered — price reached 6875", "grade": "A" | "B" | "C" | "F" }
+    ],
+    "prepForTomorrow": "Closed at 6892 near Major Weekly Level. Bulls need to reclaim 6902 Flip Zone. Failure opens path to 6858 Core Support.",
+    "lessonOfTheDay": "Today a great example of why we keep a level head until there is firm clarity. Volatility crush in the last 90 minutes neutralized the expected moon/gulag move."
   }
 }
 \`\`\`
@@ -806,6 +845,19 @@ Only suggest tickers that are NOT "${ticker.symbol}" (the current workspace).`;
         briefing.gamePlan = parsed.gamePlan;
       }
 
+      if (parsed.postMarketRecap) {
+        briefing.postMarketRecap = {
+          sessionOutcome: String(parsed.postMarketRecap.sessionOutcome || "CHOP").toUpperCase(),
+          closingPrice: parsed.postMarketRecap.closingPrice || null,
+          morningBias: parsed.postMarketRecap.morningBias || null,
+          levelsDefended: Array.isArray(parsed.postMarketRecap.levelsDefended) ? parsed.postMarketRecap.levelsDefended : [],
+          levelsLost: Array.isArray(parsed.postMarketRecap.levelsLost) ? parsed.postMarketRecap.levelsLost : [],
+          scenariosTriggered: Array.isArray(parsed.postMarketRecap.scenariosTriggered) ? parsed.postMarketRecap.scenariosTriggered : [],
+          prepForTomorrow: parsed.postMarketRecap.prepForTomorrow || null,
+          lessonOfTheDay: parsed.postMarketRecap.lessonOfTheDay || null,
+        };
+      }
+
       return { briefing, cleanContent };
     } catch (err) {
       console.error("Failed to parse tactical briefing JSON:", err);
@@ -870,28 +922,12 @@ Only suggest tickers that are NOT "${ticker.symbol}" (the current workspace).`;
   }
 
   function buildFallbackResponse(symbol: string, query: string, latestNote: any, support: any[], resistance: any[], checklist: any[]): string {
-    let response = `Here's your current **${symbol}** context from your notes:\n\n`;
-
     if (latestNote) {
-      response += `**Active Game Plan:** ${latestNote.title}\n`;
-      if (latestNote.summary) response += `> ${latestNote.summary}\n\n`;
-
-      if (support.length > 0) {
-        response += `**Support Levels:**\n${support.map((l) => `- **${l.priceLow}${l.priceHigh ? `-${l.priceHigh}` : ""}** ${l.description ? `— ${l.description}` : ""}`).join("\n")}\n\n`;
-      }
-      if (resistance.length > 0) {
-        response += `**Resistance Levels:**\n${resistance.map((l) => `- **${l.priceLow}${l.priceHigh ? `-${l.priceHigh}` : ""}** ${l.description ? `— ${l.description}` : ""}`).join("\n")}\n\n`;
-      }
-      if (checklist.length > 0) {
-        response += `**Checklist:**\n${checklist.map((ci) => `- ${ci.isCompleted ? "✅" : "⬜"} ${ci.content}`).join("\n")}\n\n`;
-      }
-
-      response += `\n*AI analysis is temporarily unavailable. The levels and plan above are from your stored notes. Please try again shortly for AI-powered insights.*`;
+      const levelCount = support.length + resistance.length;
+      return `I wasn't able to connect to the AI analysis engine right now, but I have your **${symbol}** game plan loaded — **${latestNote.title}**${latestNote.summary ? ` (${latestNote.summary})` : ""}.\n\nYou have **${levelCount} levels** and **${checklist.length} checklist items** stored from your latest playbook. To give you a full recap, I'd need the AI engine back online.\n\n**Would you like to try again?** Sometimes a quick retry resolves the connection. Or if you have a closing chart screenshot, upload it and I'll analyze it once the connection is restored.`;
     } else {
-      response += `No game plan found for ${symbol}. Upload a trading note to get started!\n\n*AI analysis is temporarily unavailable. Please try again shortly.*`;
+      return `I wasn't able to connect to the AI analysis engine right now, and I don't see a game plan loaded for **${symbol}** yet.\n\n**To get started:** Upload a trading note, PDF, or chart screenshot and I'll extract your levels, scenarios, and build a full playbook. Try again in a moment if you'd like AI-powered analysis.`;
     }
-
-    return response;
   }
 
   // ─── Playbooks ──────────────────────────────────────────────────

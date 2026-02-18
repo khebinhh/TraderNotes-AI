@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 import { format } from "date-fns";
 import { PlaybookDashboard } from "./PlaybookDashboard";
 import { TacticalBriefing } from "./TacticalBriefing";
+import { PostMarketRecap } from "./PostMarketRecap";
 import { useToast } from "@/hooks/use-toast";
 
 const ACCEPTED_FILE_TYPES = ".pdf,.png,.jpg,.jpeg,.csv";
@@ -255,7 +256,8 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
   const renderMessageContent = (msg: ChatMsg) => {
     const isAssistant = msg.role === "assistant";
     const hasBriefing = isAssistant && msg.structuredData && (msg.structuredData.sentiment || msg.structuredData.levels || msg.structuredData.ifThen);
-    const legacyLevels = (isAssistant && !hasBriefing) ? extractLevelsFromMessage(msg.content) : [];
+    const hasRecap = isAssistant && msg.structuredData?.postMarketRecap;
+    const legacyLevels = (isAssistant && !hasBriefing && !hasRecap) ? extractLevelsFromMessage(msg.content) : [];
     const syncMatches = isAssistant ? Array.from(msg.content.matchAll(/\*{0,2}\[SYNC_SUGGEST:\s*([A-Z0-9!.]+)\]\*{0,2}/g)) : [];
     const cleanContent = msg.content
       .replace(/```[\w]*\s*[\s\S]*?```/g, "")
@@ -282,7 +284,13 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
           </div>
         )}
 
-        {isAssistant && !hasBriefing && legacyLevels.length > 0 && (
+        {hasRecap && (
+          <div className={cn(cleanContent || hasBriefing ? "mt-3 pt-3 border-t border-border/30" : "")}>
+            <PostMarketRecap data={msg.structuredData!.postMarketRecap!} />
+          </div>
+        )}
+
+        {isAssistant && !hasBriefing && !hasRecap && legacyLevels.length > 0 && (
           <div className="mt-3 pt-3 border-t border-border/30">
             <div className="text-[10px] uppercase text-muted-foreground font-mono tracking-wider mb-2">
               Extracted Levels

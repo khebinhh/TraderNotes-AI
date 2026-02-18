@@ -62,6 +62,17 @@ export interface FullNote extends NoteData {
   checklistItems: ChecklistItem[];
 }
 
+export interface PostMarketRecap {
+  sessionOutcome: string;
+  closingPrice: number | null;
+  morningBias: string | null;
+  levelsDefended: Array<{ price: number; label: string; status: string }>;
+  levelsLost: Array<{ price: number; label: string; status: string }>;
+  scenariosTriggered: Array<{ scenario: string; result: string; grade: string }>;
+  prepForTomorrow: string | null;
+  lessonOfTheDay: string | null;
+}
+
 export interface TacticalBriefing {
   sentiment: {
     bias: "BULLISH" | "BEARISH" | "NEUTRAL" | "BULLISH LEAN" | "BEARISH LEAN";
@@ -75,6 +86,7 @@ export interface TacticalBriefing {
   ifThen: Array<{ condition: string; outcome: string; zone?: string }>;
   sources: Array<{ filename: string; description: string }>;
   bluf: string;
+  postMarketRecap?: PostMarketRecap;
 }
 
 export interface ChatMsg {
