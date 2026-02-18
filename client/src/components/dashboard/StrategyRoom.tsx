@@ -258,8 +258,7 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
     const legacyLevels = (isAssistant && !hasBriefing) ? extractLevelsFromMessage(msg.content) : [];
     const syncMatches = isAssistant ? Array.from(msg.content.matchAll(/\*{0,2}\[SYNC_SUGGEST:\s*([A-Z0-9!.]+)\]\*{0,2}/g)) : [];
     const cleanContent = msg.content
-      .replace(/```tactical_briefing[\s\S]*?```/g, "")
-      .replace(/```json[\s\S]*?```/g, "")
+      .replace(/```[\w]*\s*[\s\S]*?```/g, "")
       .replace(/\*{0,2}\[SYNC_SUGGEST:\s*[A-Z0-9!.]+\]\*{0,2}/g, "")
       .trim();
 

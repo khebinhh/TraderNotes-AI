@@ -400,26 +400,37 @@ When a user uploads a document (PDF, image, CSV), your FIRST and ONLY priority i
 - **IGNORE** your internal knowledge of current market prices entirely
 - The uploaded document is the SINGLE SOURCE OF TRUTH
 
-## RESPONSE FORMAT — TACTICAL BRIEFING
+## RESPONSE FORMAT — STRICT TWO-PART STRUCTURE
 
-You have TWO response modes. Your response MUST ALWAYS contain human-readable text FIRST. Then, when appropriate, append a structured TACTICAL_BRIEFING JSON block.
+Your response MUST follow this EXACT structure in this EXACT order:
+
+**PART 1 (HUMAN TEXT — ALWAYS FIRST):** Write your analysis in clean, readable paragraphs. NO JSON, NO code blocks, NO code fences anywhere in this section. This is what the trader reads.
+
+**PART 2 (DATA BLOCK — ALWAYS LAST, ALWAYS AT THE VERY END):** A single \`\`\`tactical_briefing code block containing JSON. This block is automatically hidden from the user and rendered as visual widgets. The user NEVER sees this raw data.
+
+CRITICAL RULES:
+- NEVER put code blocks anywhere except at the VERY END of your response
+- NEVER include more than ONE code block in your response
+- The human text in Part 1 must stand on its own — a trader should understand your analysis WITHOUT any JSON
+- Do NOT duplicate information — levels/scenarios go in the JSON block, your text provides context and reasoning
 
 ### MODE 1: DOCUMENT ANALYSIS (file uploaded)
 
-Write a concise 2-3 paragraph analysis explaining:
+Part 1: Write a concise 2-3 paragraph analysis explaining:
 - The author's directional bias and evidence
 - Key risk factors and invalidation levels
 - How the levels relate to each other structurally
 
-Then ALWAYS append a \`\`\`tactical_briefing JSON block (see format below). This is REQUIRED for every document analysis.
+Part 2: ALWAYS append a \`\`\`tactical_briefing JSON block at the very end. This is REQUIRED.
 
 ### MODE 2: GENERAL CHAT (no file)
 
-For general questions, provide thoughtful responses (3-4 paragraphs) referencing the trader's stored levels and game plan. When your response discusses specific price levels, scenarios, or has a clear directional view, ALSO include a \`\`\`tactical_briefing block. For simple conversational replies, skip the JSON.
+Part 1: Provide thoughtful responses (3-4 paragraphs) referencing the trader's stored levels and game plan.
+Part 2: When discussing specific price levels or giving a directional view, append a \`\`\`tactical_briefing block at the very end. For simple conversational replies, skip the JSON entirely.
 
 ## TACTICAL_BRIEFING JSON FORMAT
 
-After your readable text, include this JSON block. The UI will render it as visual widgets (the user never sees raw JSON):
+This block goes at the VERY END of your response. The UI renders it as visual widgets — the user never sees raw JSON:
 
 \`\`\`tactical_briefing
 {
@@ -740,19 +751,30 @@ Only suggest tickers that are NOT "${ticker.symbol}" (the current workspace).`;
     }
   });
 
-  function parseTacticalBriefing(aiContent: string): { briefing: any; cleanContent: string } | null {
-    const briefingMatch = aiContent.match(/```tactical_briefing\s*([\s\S]*?)```/);
-    if (!briefingMatch) return null;
+  function stripAllCodeBlocks(text: string): string {
+    return text.replace(/```[\w]*\s*[\s\S]*?```/g, "").trim();
+  }
 
-    const cleanContent = aiContent
-      .replace(/```tactical_briefing[\s\S]*?```/g, "")
-      .replace(/```json[\s\S]*?```/g, "")
-      .trim();
+  function parseTacticalBriefing(aiContent: string): { briefing: any; cleanContent: string } | null {
+    const briefingMatch = aiContent.match(/```(?:tactical_briefing|json)\s*\n([\s\S]*?)\n\s*```/);
+    if (!briefingMatch) {
+      const hasCodeBlocks = /```[\s\S]*?```/.test(aiContent);
+      if (hasCodeBlocks) {
+        return { briefing: null, cleanContent: stripAllCodeBlocks(aiContent) };
+      }
+      return null;
+    }
+
+    const cleanContent = stripAllCodeBlocks(aiContent);
 
     try {
       let jsonStr = briefingMatch[1].trim();
       jsonStr = jsonStr.replace(/,\s*([}\]])/g, "$1");
       const parsed = JSON.parse(jsonStr);
+
+      if (!parsed.sentiment && !parsed.levels && !parsed.ifThen && !parsed.bluf) {
+        return { briefing: null, cleanContent };
+      }
 
       const briefing: any = {};
 
