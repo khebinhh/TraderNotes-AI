@@ -62,12 +62,28 @@ export interface FullNote extends NoteData {
   checklistItems: ChecklistItem[];
 }
 
+export interface TacticalBriefing {
+  sentiment: {
+    bias: "BULLISH" | "BEARISH" | "NEUTRAL" | "BULLISH LEAN" | "BEARISH LEAN";
+    summary: string;
+  };
+  levels: {
+    overhead: Array<{ price: number; priceHigh?: number | null; label: string; source?: string }>;
+    pivots: Array<{ price: number; priceHigh?: number | null; label: string; source?: string }>;
+    basins: Array<{ price: number; priceHigh?: number | null; label: string; source?: string }>;
+  };
+  ifThen: Array<{ condition: string; outcome: string; zone?: string }>;
+  sources: Array<{ filename: string; description: string }>;
+  bluf: string;
+}
+
 export interface ChatMsg {
   id: number;
   userId: string | null;
   tickerId: number | null;
   role: string;
   content: string;
+  structuredData?: TacticalBriefing | null;
   createdAt: string;
 }
 

@@ -10,11 +10,12 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchChatByTicker, sendChatMessage, analyzeDocument, fetchPlaybooks, updatePlaybookReview,
   fetchJournalEntries, createJournalEntry, deleteJournalEntry,
-  type FullNote, type ChatMsg, type TickerData, type NoteData, type Playbook, type JournalEntry
+  type FullNote, type ChatMsg, type TickerData, type NoteData, type Playbook, type JournalEntry, type TacticalBriefing as TacticalBriefingData
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { format } from "date-fns";
 import { PlaybookDashboard } from "./PlaybookDashboard";
+import { TacticalBriefing } from "./TacticalBriefing";
 import { useToast } from "@/hooks/use-toast";
 
 const ACCEPTED_FILE_TYPES = ".pdf,.png,.jpg,.jpeg,.csv";
@@ -253,53 +254,42 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
 
   const renderMessageContent = (msg: ChatMsg) => {
     const isAssistant = msg.role === "assistant";
-    const levels = isAssistant ? extractLevelsFromMessage(msg.content) : [];
+    const hasBriefing = isAssistant && msg.structuredData && (msg.structuredData.sentiment || msg.structuredData.levels || msg.structuredData.ifThen);
+    const legacyLevels = (isAssistant && !hasBriefing) ? extractLevelsFromMessage(msg.content) : [];
     const syncMatches = isAssistant ? Array.from(msg.content.matchAll(/\*{0,2}\[SYNC_SUGGEST:\s*([A-Z0-9!.]+)\]\*{0,2}/g)) : [];
     const cleanContent = msg.content
+      .replace(/```tactical_briefing[\s\S]*?```/g, "")
       .replace(/```json[\s\S]*?```/g, "")
       .replace(/\*{0,2}\[SYNC_SUGGEST:\s*[A-Z0-9!.]+\]\*{0,2}/g, "")
       .trim();
 
     return (
       <>
-        <div className="space-y-2">
-          {cleanContent.split("\n").map((line, i) => (
-            <p key={i} dangerouslySetInnerHTML={{
-              __html: line
-                .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
-                .replace(/\[([ x])\]/g, (_, c) => c === "x" ? "&#9989;" : "&#11036;")
-            }} />
-          ))}
-        </div>
-
-        {isAssistant && syncMatches.length > 0 && onAddTicker && (
-          <div className="mt-3 pt-3 border-t border-border/30">
-            <div className="text-[10px] uppercase text-muted-foreground font-mono tracking-wider mb-2">
-              Detected Tickers
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {syncMatches.map((match, i) => (
-                <button
-                  key={i}
-                  onClick={() => onAddTicker(match[1])}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-mono font-bold border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 transition-all hover:scale-105 active:scale-95"
-                  data-testid={`button-sync-add-${match[1]}`}
-                >
-                  <Sparkles className="h-3 w-3" />
-                  Open {match[1]} Workspace
-                </button>
-              ))}
-            </div>
+        {cleanContent && (
+          <div className="space-y-2">
+            {cleanContent.split("\n").map((line, i) => (
+              <p key={i} dangerouslySetInnerHTML={{
+                __html: line
+                  .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+                  .replace(/\[([ x])\]/g, (_, c) => c === "x" ? "&#9989;" : "&#11036;")
+              }} />
+            ))}
           </div>
         )}
 
-        {isAssistant && levels.length > 0 && (
+        {hasBriefing && (
+          <div className={cn(cleanContent ? "mt-3 pt-3 border-t border-border/30" : "")}>
+            <TacticalBriefing data={msg.structuredData!} onAddToChart={onAddToChart} />
+          </div>
+        )}
+
+        {isAssistant && !hasBriefing && legacyLevels.length > 0 && (
           <div className="mt-3 pt-3 border-t border-border/30">
             <div className="text-[10px] uppercase text-muted-foreground font-mono tracking-wider mb-2">
               Extracted Levels
             </div>
             <div className="flex flex-wrap gap-1.5">
-              {levels.map((level, i) => (
+              {legacyLevels.map((level, i) => (
                 <TooltipProvider key={i}>
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -323,6 +313,27 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
                     </TooltipContent>
                   </Tooltip>
                 </TooltipProvider>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {isAssistant && syncMatches.length > 0 && onAddTicker && (
+          <div className="mt-3 pt-3 border-t border-border/30">
+            <div className="text-[10px] uppercase text-muted-foreground font-mono tracking-wider mb-2">
+              Detected Tickers
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {syncMatches.map((match, i) => (
+                <button
+                  key={i}
+                  onClick={() => onAddTicker(match[1])}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-mono font-bold border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 transition-all hover:scale-105 active:scale-95"
+                  data-testid={`button-sync-add-${match[1]}`}
+                >
+                  <Sparkles className="h-3 w-3" />
+                  Open {match[1]} Workspace
+                </button>
               ))}
             </div>
           </div>

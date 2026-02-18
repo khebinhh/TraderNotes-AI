@@ -67,6 +67,7 @@ export const chatMessages = pgTable("chat_messages", {
   tickerId: integer("ticker_id").references(() => tickers.id, { onDelete: "cascade" }),
   role: text("role").notNull(),
   content: text("content").notNull(),
+  structuredData: jsonb("structured_data"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

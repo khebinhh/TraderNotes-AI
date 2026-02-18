@@ -18,4 +18,4 @@ package.json
 
 # Attached assets
 attached_assets/
-client/public/opengraph.jpg
+client/public
