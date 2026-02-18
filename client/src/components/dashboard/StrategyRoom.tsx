@@ -62,6 +62,8 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
   const [attachedFile, setAttachedFile] = useState<File | null>(null);
   const [filePreview, setFilePreview] = useState<string | null>(null);
   const [activePlaybookId, setActivePlaybookId] = useState<number | null>(null);
+  const [optimisticMessages, setOptimisticMessages] = useState<ChatMsg[]>([]);
+  const [isAiLoading, setIsAiLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
@@ -85,11 +87,17 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
     mutationFn: ({ content, file }: { content: string; file?: File }) =>
       sendChatMessage(activeTicker!.id, content, file),
     onSuccess: (data) => {
+      setOptimisticMessages([]);
+      setIsAiLoading(false);
       queryClient.invalidateQueries({ queryKey: ["/api/tickers", activeTicker?.id, "chat"] });
       if (data.createdNoteId) {
         queryClient.invalidateQueries({ queryKey: ["/api/tickers", activeTicker?.id, "notes"] });
         onSelectNote(data.createdNoteId);
       }
+    },
+    onError: () => {
+      setOptimisticMessages([]);
+      setIsAiLoading(false);
     },
   });
 
@@ -97,12 +105,16 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
     mutationFn: ({ file, content }: { file: File; content?: string }) =>
       analyzeDocument(activeTicker!.id, file, content),
     onSuccess: (playbook) => {
+      setOptimisticMessages([]);
+      setIsAiLoading(false);
       setActivePlaybookId(playbook.id);
       queryClient.invalidateQueries({ queryKey: ["/api/tickers", activeTicker?.id, "playbooks"] });
       queryClient.invalidateQueries({ queryKey: ["/api/tickers", activeTicker?.id, "chat"] });
       toast({ title: "Playbook Generated", description: `${(playbook.playbookData as any).bias || "Open"} bias — ${(playbook.playbookData as any).macro_theme || "Analysis complete"}` });
     },
     onError: (err: Error) => {
+      setOptimisticMessages([]);
+      setIsAiLoading(false);
       toast({ title: "Analysis Failed", description: err.message, variant: "destructive" });
     },
   });
@@ -146,7 +158,7 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
         scrollContainer.scrollTop = scrollContainer.scrollHeight;
       }
     }
-  }, [messages, activePlaybook]);
+  }, [messages, optimisticMessages, isAiLoading, activePlaybook]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -175,21 +187,36 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
     if ((!input.trim() && !attachedFile) || !activeTicker) return;
     if (chatMutation.isPending || analyzeMutation.isPending) return;
 
-    if (attachedFile && mode === "playbook") {
-      analyzeMutation.mutate({ file: attachedFile, content: input || undefined });
-      setInput("");
-      removeFile();
-    } else if (attachedFile && mode === "chat") {
-      chatMutation.mutate({ content: input || `Analyze this file: ${attachedFile.name}`, file: attachedFile });
-      setInput("");
-      removeFile();
-    } else if (attachedFile) {
-      analyzeMutation.mutate({ file: attachedFile, content: input || undefined });
-      setInput("");
-      removeFile();
+    const currentInput = input;
+    const currentFile = attachedFile;
+    const optimisticUserMsg: ChatMsg = {
+      id: Date.now(),
+      role: "user",
+      content: currentInput + (currentFile ? ` [File: ${currentFile.name}]` : ""),
+      createdAt: new Date().toISOString(),
+      tickerId: activeTicker.id,
+      userId: "",
+    };
+
+    setInput("");
+    removeFile();
+
+    if (currentFile && mode === "playbook") {
+      setOptimisticMessages([optimisticUserMsg]);
+      setIsAiLoading(true);
+      analyzeMutation.mutate({ file: currentFile, content: currentInput || undefined });
+    } else if (currentFile && mode === "chat") {
+      setOptimisticMessages([optimisticUserMsg]);
+      setIsAiLoading(true);
+      chatMutation.mutate({ content: currentInput || `Analyze this file: ${currentFile.name}`, file: currentFile });
+    } else if (currentFile) {
+      setOptimisticMessages([optimisticUserMsg]);
+      setIsAiLoading(true);
+      analyzeMutation.mutate({ file: currentFile, content: currentInput || undefined });
     } else {
-      chatMutation.mutate({ content: input, file: undefined });
-      setInput("");
+      setOptimisticMessages([optimisticUserMsg]);
+      setIsAiLoading(true);
+      chatMutation.mutate({ content: currentInput, file: undefined });
     }
   };
 
@@ -482,7 +509,7 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
           <>
             <ScrollArea className="flex-1" ref={scrollRef}>
               <div className="max-w-3xl mx-auto py-6 px-6 space-y-6">
-                {messages.map((msg) => (
+                {[...messages, ...optimisticMessages].map((msg) => (
                   <div key={msg.id} className={cn("flex gap-4", msg.role === "user" ? "justify-end" : "")} data-testid={`chat-message-${msg.id}`}>
                     {msg.role === "assistant" && (
                       <Avatar className="h-8 w-8 border border-primary/20 shadow-[0_0_10px_-4px_rgba(245,158,11,0.3)] shrink-0 mt-1">
@@ -506,7 +533,7 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
                     )}
                   </div>
                 ))}
-                {isProcessing && (
+                {isAiLoading && (
                   <div className="flex gap-4">
                     <Avatar className="h-8 w-8 border border-primary/20 shrink-0">
                       <AvatarFallback className="bg-gradient-to-br from-indigo-900 to-slate-900 text-primary">

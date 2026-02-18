@@ -39,6 +39,8 @@ export const ActionDashboard = forwardRef<ActionDashboardHandle, ActionDashboard
     const [chatInput, setChatInput] = useState("");
     const [attachedFile, setAttachedFile] = useState<File | null>(null);
     const [filePreview, setFilePreview] = useState<string | null>(null);
+    const [optimisticMessages, setOptimisticMessages] = useState<ChatMsg[]>([]);
+    const [isAiLoading, setIsAiLoading] = useState(false);
     const queryClient = useQueryClient();
     const { toast } = useToast();
 
@@ -70,9 +72,13 @@ export const ActionDashboard = forwardRef<ActionDashboardHandle, ActionDashboard
       mutationFn: ({ content, file }: { content: string; file?: File }) =>
         sendTacticalChat(activeTicker!.id, content, file),
       onSuccess: () => {
+        setOptimisticMessages([]);
+        setIsAiLoading(false);
         queryClient.invalidateQueries({ queryKey: ["/api/tickers", activeTicker?.id, "chat"] });
       },
       onError: (err: Error) => {
+        setOptimisticMessages([]);
+        setIsAiLoading(false);
         toast({ title: "Tactical Analysis Failed", description: err.message, variant: "destructive" });
       },
     });
@@ -82,7 +88,7 @@ export const ActionDashboard = forwardRef<ActionDashboardHandle, ActionDashboard
         const scrollContainer = scrollRef.current.querySelector("[data-radix-scroll-area-viewport]");
         if (scrollContainer) scrollContainer.scrollTop = scrollContainer.scrollHeight;
       }
-    }, [messages]);
+    }, [messages, optimisticMessages, isAiLoading]);
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
@@ -103,12 +109,26 @@ export const ActionDashboard = forwardRef<ActionDashboardHandle, ActionDashboard
 
     const handleSendChat = () => {
       if ((!chatInput.trim() && !attachedFile) || !activeTicker || tacticalChatMutation.isPending) return;
-      tacticalChatMutation.mutate({ content: chatInput, file: attachedFile || undefined });
+
+      const currentInput = chatInput;
+      const currentFile = attachedFile;
+      const optimisticUserMsg: ChatMsg = {
+        id: Date.now(),
+        role: "user",
+        content: currentInput + (currentFile ? ` [File: ${currentFile.name}]` : ""),
+        createdAt: new Date().toISOString(),
+        tickerId: activeTicker.id,
+        userId: "",
+      };
+
       setChatInput("");
       removeFile();
+      setOptimisticMessages([optimisticUserMsg]);
+      setIsAiLoading(true);
+      tacticalChatMutation.mutate({ content: currentInput, file: currentFile || undefined });
     };
 
-    const tacticalMessages = messages.slice(-10);
+    const tacticalMessages = [...messages.slice(-10), ...optimisticMessages];
 
     return (
       <div className="h-full">
@@ -188,10 +208,16 @@ export const ActionDashboard = forwardRef<ActionDashboardHandle, ActionDashboard
                       )}
                     </div>
                   ))}
-                  {tacticalChatMutation.isPending && (
+                  {isAiLoading && (
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <Loader2 className="h-3 w-3 animate-spin text-primary" />
-                      <span>Analyzing...</span>
+                      <div className="inline-block rounded-lg px-3 py-2 bg-muted/50 border border-border">
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-1.5 h-1.5 bg-primary/50 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                          <div className="w-1.5 h-1.5 bg-primary/50 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                          <div className="w-1.5 h-1.5 bg-primary/50 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                          <span className="text-[10px] text-muted-foreground ml-1">Analyzing...</span>
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>
