@@ -274,25 +274,27 @@ export async function registerRoutes(
     res.json(messages);
   });
 
-  app.post("/api/tickers/:tickerId/chat", isAuthenticated, upload.single("file"), async (req, res) => {
-    const tempFilePath = req.file?.path;
+  app.post("/api/tickers/:tickerId/chat", isAuthenticated, upload.array("files", 10), async (req, res) => {
+    const uploadedFiles = (req.files as Express.Multer.File[]) || [];
+    const tempFilePaths = uploadedFiles.map(f => f.path);
     try {
       const userId = getUserId(res);
       const tickerId = parseInt(req.params.tickerId as string);
       const content = req.body.content || "";
 
-      if (!content.trim() && !req.file) {
+      if (!content.trim() && uploadedFiles.length === 0) {
         return res.status(400).json({ message: "Please provide a message or file" });
       }
 
       const ticker = await storage.getTicker(tickerId, userId);
       if (!ticker) return res.status(404).json({ message: "Ticker not found" });
 
+      const fileNames = uploadedFiles.map(f => f.originalname).join(", ");
       const userMessage = await storage.createChatMessage({
         userId,
         tickerId,
         role: "user",
-        content: content + (req.file ? ` [File: ${req.file.originalname}]` : ""),
+        content: content + (uploadedFiles.length > 0 ? ` [${uploadedFiles.length} file${uploadedFiles.length > 1 ? "s" : ""}: ${fileNames}]` : ""),
       });
 
       const tickerNotes = await storage.getNotesByTicker(tickerId, userId);
@@ -360,8 +362,8 @@ export async function registerRoutes(
         return msg.role !== arr[i - 1].role;
       });
 
-      const hasFile = !!req.file;
-      const originalFilename = req.file?.originalname;
+      const hasFile = uploadedFiles.length > 0;
+      const originalFilename = uploadedFiles.length > 0 ? uploadedFiles.map(f => f.originalname).join(", ") : undefined;
 
       const systemInstruction = `You are a Trading Mentor AI — "Chief of Staff" — for the instrument ${ticker.symbol}. You follow a strict "High-Reasoning" process when analyzing documents and answering questions.
 
@@ -402,6 +404,15 @@ When images or PDFs with charts are uploaded, use your VISION capabilities to:
 - Detect chart patterns (head & shoulders, flags, channels, etc.)
 - Cross-reference visual chart levels with text-mentioned levels in the document
 - Note which page/section of the document each level comes from for source attribution
+
+## MULTI-FILE SYNTHESIS (when multiple files are uploaded)
+
+When the trader uploads multiple files at once, you must SYNTHESIZE across all inputs:
+1. **Cross-Reference Levels**: Compare price levels across different documents/charts. If multiple sources agree on a level, flag it as HIGH CONFIDENCE.
+2. **Timeframe Alignment**: If charts from different timeframes are uploaded (e.g., daily + 4H + 1H), identify where levels converge across timeframes — these are the strongest zones.
+3. **Source Reconciliation**: If two documents disagree (e.g., one says bullish, another says bearish), highlight the conflict and explain which has stronger evidence.
+4. **Discord/Alert Cross-Reference**: If a Discord screenshot or alert is uploaded alongside a chart, verify whether the alert levels match what's visible on the chart.
+5. **Comprehensive Attribution**: Label each extracted level with which file it came from (e.g., "6924 — Source: chart1.png + levels.pdf (confirmed by both)").
 
 ## SCENARIO PARSING — PRICE CONDITIONS
 
@@ -533,50 +544,57 @@ ${contextInfo}
       const parts: any[] = [];
       let fileProcessingFailed = false;
 
-      if (req.file) {
-        try {
-          const mimeType = inferMimeType(req.file.originalname, req.file.mimetype);
-          const uploadResult = await fileManager.uploadFile(req.file.path, {
-            mimeType,
-            displayName: req.file.originalname,
-          });
+      if (uploadedFiles.length > 0) {
+        const fileUploadResults = await Promise.allSettled(
+          uploadedFiles.map(async (uploadedFile) => {
+            try {
+              const mimeType = inferMimeType(uploadedFile.originalname, uploadedFile.mimetype);
+              const uploadResult = await fileManager.uploadFile(uploadedFile.path, {
+                mimeType,
+                displayName: uploadedFile.originalname,
+              });
 
-          let file = uploadResult.file;
-          let attempts = 0;
-          while (file.state === FileState.PROCESSING && attempts < 60) {
-            await new Promise((resolve) => setTimeout(resolve, 2000));
-            const result = await fileManager.getFile(file.name);
-            file = result;
-            attempts++;
-          }
+              let file = uploadResult.file;
+              let attempts = 0;
+              while (file.state === FileState.PROCESSING && attempts < 60) {
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+                const result = await fileManager.getFile(file.name);
+                file = result;
+                attempts++;
+              }
 
-          if (file.state === FileState.ACTIVE) {
-            parts.push({ fileData: { mimeType: file.mimeType, fileUri: file.uri } });
-          } else if (file.state === FileState.PROCESSING) {
-            console.error("Gemini file still PROCESSING after 120s timeout");
-            fileProcessingFailed = true;
-          } else {
-            console.error(`Gemini file in unexpected state: ${file.state}`);
-            fileProcessingFailed = true;
-          }
-        } catch (fileErr: any) {
-          console.warn("Gemini file upload error, trying text fallback:", fileErr?.message);
-          try {
-            const chatMimeType = inferMimeType(req.file!.originalname, req.file!.mimetype);
-            const fileContent = await extractTextFromFile(req.file!.path, chatMimeType);
-            if (fileContent) {
-              parts.push({ text: `[Document content from "${req.file!.originalname}"]:\n\n${fileContent}` });
-            } else if (chatMimeType.startsWith("image/")) {
-              const imageData = fs.readFileSync(req.file!.path);
-              parts.push({ inlineData: { mimeType: chatMimeType, data: imageData.toString("base64") } });
-            } else {
-              fileProcessingFailed = true;
+              if (file.state === FileState.ACTIVE) {
+                return { type: "fileData" as const, data: { fileData: { mimeType: file.mimeType, fileUri: file.uri } } };
+              }
+              throw new Error(`File ${uploadedFile.originalname} in state: ${file.state}`);
+            } catch (fileErr: any) {
+              console.warn(`Gemini upload error for ${uploadedFile.originalname}, trying fallback:`, fileErr?.message);
+              const chatMimeType = inferMimeType(uploadedFile.originalname, uploadedFile.mimetype);
+              if (chatMimeType.startsWith("image/")) {
+                const imageData = fs.readFileSync(uploadedFile.path);
+                return { type: "inlineData" as const, data: { inlineData: { mimeType: chatMimeType, data: imageData.toString("base64") } } };
+              }
+              const fileContent = await extractTextFromFile(uploadedFile.path, chatMimeType);
+              if (fileContent) {
+                return { type: "text" as const, data: { text: `[Document content from "${uploadedFile.originalname}"]:\n\n${fileContent}` } };
+              }
+              throw fileErr;
             }
-          } catch {
-            fileProcessingFailed = true;
+          })
+        );
+
+        let successCount = 0;
+        for (const result of fileUploadResults) {
+          if (result.status === "fulfilled") {
+            parts.push(result.value.data);
+            successCount++;
           }
-        } finally {
-          try { if (tempFilePath) fs.unlinkSync(tempFilePath); } catch {}
+        }
+        if (successCount === 0 && uploadedFiles.length > 0) {
+          fileProcessingFailed = true;
+        }
+        for (const path of tempFilePaths) {
+          try { fs.unlinkSync(path); } catch {}
         }
       }
 
@@ -688,8 +706,8 @@ ${contextInfo}
       console.error("Chat error:", err);
       res.status(400).json({ message: err.message });
     } finally {
-      if (tempFilePath) {
-        try { fs.unlinkSync(tempFilePath); } catch {}
+      for (const path of tempFilePaths) {
+        try { fs.unlinkSync(path); } catch {}
       }
     }
   });
@@ -810,8 +828,9 @@ ${contextInfo}
 
   // ─── Analyze Document (Playbook Generator) ────────────────────
 
-  app.post("/api/analyze-document", isAuthenticated, upload.single("file"), async (req, res) => {
-    const tempFilePath = req.file?.path;
+  app.post("/api/analyze-document", isAuthenticated, upload.array("files", 10), async (req, res) => {
+    const uploadedFiles = (req.files as Express.Multer.File[]) || [];
+    const tempFilePaths = uploadedFiles.map(f => f.path);
     try {
       const userId = getUserId(res);
       const tickerIdRaw = parseInt(req.body.tickerId as string);
@@ -819,14 +838,14 @@ ${contextInfo}
       const tickerId = tickerIdRaw;
       const userMessage = typeof req.body.content === "string" ? req.body.content.trim() : "";
 
-      if (!req.file) {
+      if (uploadedFiles.length === 0) {
         return res.status(400).json({ message: "Please upload a document to analyze" });
       }
 
       const ticker = await storage.getTicker(tickerId, userId);
       if (!ticker) return res.status(404).json({ message: "Ticker not found" });
 
-      const originalFilename = req.file.originalname;
+      const originalFilename = uploadedFiles.map(f => f.originalname).join(", ");
 
       const playbookSystemPrompt = `You are a Trading Playbook Generator for ${ticker.symbol}. Your job is to read uploaded trading documents (PDFs, images, CSVs) from analysts like PharmD_KS, Ms. Izzy, and others, and extract a STRUCTURED PLAYBOOK in strict JSON format.
 
@@ -953,9 +972,18 @@ The JSON must follow this EXACT structure:
   ]
 }
 
+## MULTI-FILE SYNTHESIS (when multiple documents are uploaded)
+
+When multiple files are uploaded simultaneously, you must SYNTHESIZE a unified playbook:
+1. **Merge Levels**: Combine price levels from all documents into a single structural_zones map. If the same level appears in multiple sources, mark it as HIGH CONFIDENCE in the context field.
+2. **Reconcile Bias**: If documents disagree on bias, lean toward the source with the most detailed evidence. Note the conflict in the thesis.
+3. **Cross-Reference Charts + Text**: If both a chart image and a PDF with written levels are uploaded, verify that the chart annotations match the text. Flag discrepancies.
+4. **Attribution Per Level**: Include which file each level was extracted from in the source field (e.g., "PharmD_KS levels.pdf + 4H_chart.png").
+5. **Unified If/Then**: Merge all If/Then scenarios into a single list, deduplicating where conditions overlap.
+
 ## CRITICAL RULES
-1. Extract EVERY price level mentioned — text AND chart annotations
-2. Use ONLY data from the uploaded document. NEVER use your own market knowledge.
+1. Extract EVERY price level mentioned — text AND chart annotations across ALL uploaded files
+2. Use ONLY data from the uploaded documents. NEVER use your own market knowledge.
 3. Quote the author's exact language wherever possible
 4. If the document doesn't specify a field, use reasonable defaults but flag it
 5. The JSON must be parseable — no trailing commas, no comments
@@ -973,50 +1001,55 @@ The JSON must follow this EXACT structure:
 
       const parts: any[] = [];
 
-      const mimeType = inferMimeType(originalFilename, req.file.mimetype);
+      const fileUploadResults = await Promise.allSettled(
+        uploadedFiles.map(async (uploadedFile) => {
+          const mimeType = inferMimeType(uploadedFile.originalname, uploadedFile.mimetype);
+          try {
+            const uploadResult = await fileManager.uploadFile(uploadedFile.path, {
+              mimeType,
+              displayName: uploadedFile.originalname,
+            });
 
-      try {
-        const uploadResult = await fileManager.uploadFile(req.file.path, {
-          mimeType,
-          displayName: originalFilename,
-        });
+            let file = uploadResult.file;
+            let attempts = 0;
+            while (file.state === FileState.PROCESSING && attempts < 60) {
+              await new Promise((resolve) => setTimeout(resolve, 2000));
+              const result = await fileManager.getFile(file.name);
+              file = result;
+              attempts++;
+            }
 
-        let file = uploadResult.file;
-        let attempts = 0;
-        while (file.state === FileState.PROCESSING && attempts < 60) {
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-          const result = await fileManager.getFile(file.name);
-          file = result;
-          attempts++;
-        }
-
-        if (file.state === FileState.ACTIVE) {
-          parts.push({ fileData: { mimeType: file.mimeType, fileUri: file.uri } });
-        } else {
-          console.warn("Gemini file not ACTIVE after processing, falling back to text extraction");
-          const fileContent = await extractTextFromFile(req.file.path, mimeType);
-          if (fileContent) {
-            parts.push({ text: `[Document content from "${originalFilename}"]:\n\n${fileContent}` });
-          } else {
-            return res.status(500).json({ message: "Unable to extract text from this file type. Try PDF, CSV, or text files." });
+            if (file.state === FileState.ACTIVE) {
+              return { data: { fileData: { mimeType: file.mimeType, fileUri: file.uri } } };
+            }
+            throw new Error(`File ${uploadedFile.originalname} in state: ${file.state}`);
+          } catch (uploadErr: any) {
+            console.warn(`Gemini upload failed for ${uploadedFile.originalname}, trying fallback:`, uploadErr?.message);
+            if (mimeType.startsWith("image/")) {
+              const imageData = fs.readFileSync(uploadedFile.path);
+              return { data: { inlineData: { mimeType, data: imageData.toString("base64") } } };
+            }
+            const fileContent = await extractTextFromFile(uploadedFile.path, mimeType);
+            if (fileContent) {
+              return { data: { text: `[Document content from "${uploadedFile.originalname}"]:\n\n${fileContent}` } };
+            }
+            throw uploadErr;
           }
+        })
+      );
+
+      let successCount = 0;
+      for (const result of fileUploadResults) {
+        if (result.status === "fulfilled") {
+          parts.push(result.value.data);
+          successCount++;
         }
-      } catch (uploadErr: any) {
-        console.warn("Gemini File API upload failed, falling back to text extraction:", uploadErr?.message);
-        try {
-          const fileContent = await extractTextFromFile(req.file.path, mimeType);
-          if (fileContent) {
-            parts.push({ text: `[Document content from "${originalFilename}"]:\n\n${fileContent}` });
-          } else if (mimeType.startsWith("image/")) {
-            const imageData = fs.readFileSync(req.file.path);
-            parts.push({ inlineData: { mimeType, data: imageData.toString("base64") } });
-          } else {
-            return res.status(500).json({ message: "Failed to process file. Please try a different file format." });
-          }
-        } catch (extractErr: any) {
-          console.error("Text extraction also failed:", extractErr?.message);
-          return res.status(500).json({ message: "Failed to process file. Please try a different file format (PDF, PNG, JPG, CSV)." });
-        }
+      }
+      if (successCount === 0) {
+        return res.status(500).json({ message: "Failed to process all uploaded files. Please try different file formats (PDF, PNG, JPG, CSV)." });
+      }
+      for (const path of tempFilePaths) {
+        try { fs.unlinkSync(path); } catch {}
       }
 
       parts.push({ text: userMessage || `Analyze this document and extract a complete trading playbook for ${ticker.symbol}. Return ONLY the JSON structure.` });
@@ -1077,8 +1110,8 @@ The JSON must follow this EXACT structure:
       console.error("Analyze document error:", err);
       res.status(500).json({ message: err.message || "Failed to analyze document" });
     } finally {
-      if (tempFilePath) {
-        try { fs.unlinkSync(tempFilePath); } catch {}
+      for (const path of tempFilePaths) {
+        try { fs.unlinkSync(path); } catch {}
       }
     }
   });
@@ -1265,8 +1298,9 @@ The JSON must follow this EXACT structure:
 
   // ─── Tactical Chat (Action Dashboard) ─────────────────────────────
 
-  app.post("/api/tickers/:tickerId/tactical-chat", isAuthenticated, upload.single("file"), async (req, res) => {
-    const tempFilePath = req.file?.path;
+  app.post("/api/tickers/:tickerId/tactical-chat", isAuthenticated, upload.array("files", 10), async (req, res) => {
+    const uploadedFiles = (req.files as Express.Multer.File[]) || [];
+    const tempFilePaths = uploadedFiles.map(f => f.path);
     try {
       const userId = getUserId(res);
       const tickerId = parseInt(req.params.tickerId as string);
@@ -1318,6 +1352,13 @@ You are the trader's execution partner. When they drop a chart screenshot, you:
 - **VAH/VAL**: Value Area High / Low
 - **ONH/ONL**: Overnight High / Low
 
+## MULTI-FILE ANALYSIS
+When multiple chart screenshots or files are uploaded simultaneously:
+1. Compare prices across all charts — identify which timeframe each chart represents
+2. Cross-reference levels visible across multiple charts for HIGH CONFIDENCE zones
+3. If a Discord alert screenshot accompanies a chart, verify the alert levels against the chart
+4. Synthesize a unified tactical assessment from all uploaded inputs
+
 ## SPATIAL OCR RULES
 When a chart image is uploaded:
 1. Read the Y-axis to find the exact current price
@@ -1345,43 +1386,58 @@ ${playbookContext}`;
 
       const parts: any[] = [];
 
-      if (req.file) {
-        try {
-          const mimeType = inferMimeType(req.file.originalname, req.file.mimetype);
-          const uploadResult = await fileManager.uploadFile(req.file.path, {
-            mimeType,
-            displayName: req.file.originalname,
-          });
+      if (uploadedFiles.length > 0) {
+        const fileUploadResults = await Promise.allSettled(
+          uploadedFiles.map(async (uploadedFile) => {
+            try {
+              const mimeType = inferMimeType(uploadedFile.originalname, uploadedFile.mimetype);
+              const uploadResult = await fileManager.uploadFile(uploadedFile.path, {
+                mimeType,
+                displayName: uploadedFile.originalname,
+              });
 
-          let file = uploadResult.file;
-          let attempts = 0;
-          while (file.state === FileState.PROCESSING && attempts < 60) {
-            await new Promise((resolve) => setTimeout(resolve, 2000));
-            const result = await fileManager.getFile(file.name);
-            file = result;
-            attempts++;
-          }
+              let file = uploadResult.file;
+              let attempts = 0;
+              while (file.state === FileState.PROCESSING && attempts < 60) {
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+                const result = await fileManager.getFile(file.name);
+                file = result;
+                attempts++;
+              }
 
-          if (file.state === FileState.ACTIVE) {
-            parts.push({ fileData: { mimeType: file.mimeType, fileUri: file.uri } });
-          }
-        } catch (fileErr: any) {
-          try {
-            const chatMimeType = inferMimeType(req.file!.originalname, req.file!.mimetype);
-            if (chatMimeType.startsWith("image/")) {
-              const imageData = fs.readFileSync(req.file!.path);
-              parts.push({ inlineData: { mimeType: chatMimeType, data: imageData.toString("base64") } });
-            } else {
-              const fileContent = await extractTextFromFile(req.file!.path, chatMimeType);
-              if (fileContent) parts.push({ text: `[Document content]:\n\n${fileContent}` });
+              if (file.state === FileState.ACTIVE) {
+                return { data: { fileData: { mimeType: file.mimeType, fileUri: file.uri } } };
+              }
+              throw new Error(`File ${uploadedFile.originalname} in state: ${file.state}`);
+            } catch (fileErr: any) {
+              const chatMimeType = inferMimeType(uploadedFile.originalname, uploadedFile.mimetype);
+              if (chatMimeType.startsWith("image/")) {
+                const imageData = fs.readFileSync(uploadedFile.path);
+                return { data: { inlineData: { mimeType: chatMimeType, data: imageData.toString("base64") } } };
+              }
+              const fileContent = await extractTextFromFile(uploadedFile.path, chatMimeType);
+              if (fileContent) {
+                return { data: { text: `[Document content]:\n\n${fileContent}` } };
+              }
+              throw fileErr;
             }
-          } catch {}
+          })
+        );
+
+        for (const result of fileUploadResults) {
+          if (result.status === "fulfilled") {
+            parts.push(result.value.data);
+          }
+        }
+        for (const path of tempFilePaths) {
+          try { fs.unlinkSync(path); } catch {}
         }
       }
 
+      const fileNames = uploadedFiles.map(f => f.originalname).join(", ");
       parts.push({ text: content || "Analyze this chart screenshot. What price am I at and what does the playbook say?" });
 
-      await storage.createChatMessage({ userId, tickerId, role: "user", content: content || "[Chart Screenshot uploaded]" });
+      await storage.createChatMessage({ userId, tickerId, role: "user", content: content || (uploadedFiles.length > 0 ? `[${uploadedFiles.length} file${uploadedFiles.length > 1 ? "s" : ""}: ${fileNames}]` : "[Chart Screenshot uploaded]") });
 
       const result = await model.generateContent({ contents: [{ role: "user", parts }] });
       const aiText = result.response.text();
@@ -1393,7 +1449,9 @@ ${playbookContext}`;
       console.error("Tactical chat error:", err);
       res.status(500).json({ message: err.message || "Tactical analysis failed" });
     } finally {
-      if (tempFilePath) try { fs.unlinkSync(tempFilePath); } catch {}
+      for (const path of tempFilePaths) {
+        try { fs.unlinkSync(path); } catch {}
+      }
     }
   });
 

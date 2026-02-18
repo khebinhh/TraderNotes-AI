@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
-import { Send, Crosshair, Paperclip, ImageIcon, Loader2, X } from "lucide-react";
+import { Send, Crosshair, Paperclip, ImageIcon, FileText, Loader2, X } from "lucide-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchChatByTicker, sendTacticalChat,
@@ -37,8 +37,8 @@ export const ActionDashboard = forwardRef<ActionDashboardHandle, ActionDashboard
     const scrollRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [chatInput, setChatInput] = useState("");
-    const [attachedFile, setAttachedFile] = useState<File | null>(null);
-    const [filePreview, setFilePreview] = useState<string | null>(null);
+    const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+    const [filePreviews, setFilePreviews] = useState<Map<string, string>>(new Map());
     const [optimisticMessages, setOptimisticMessages] = useState<ChatMsg[]>([]);
     const [isAiLoading, setIsAiLoading] = useState(false);
     const queryClient = useQueryClient();
@@ -69,8 +69,8 @@ export const ActionDashboard = forwardRef<ActionDashboardHandle, ActionDashboard
     });
 
     const tacticalChatMutation = useMutation({
-      mutationFn: ({ content, file }: { content: string; file?: File }) =>
-        sendTacticalChat(activeTicker!.id, content, file),
+      mutationFn: ({ content, files }: { content: string; files?: File[] }) =>
+        sendTacticalChat(activeTicker!.id, content, files),
       onSuccess: () => {
         setOptimisticMessages([]);
         setIsAiLoading(false);
@@ -91,41 +91,51 @@ export const ActionDashboard = forwardRef<ActionDashboardHandle, ActionDashboard
     }, [messages, optimisticMessages, isAiLoading]);
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      if (file.size > 10 * 1024 * 1024) { toast({ title: "File too large", variant: "destructive" }); return; }
-      setAttachedFile(file);
-      if (file.type.startsWith("image/")) {
-        const reader = new FileReader();
-        reader.onload = (ev) => setFilePreview(ev.target?.result as string);
-        reader.readAsDataURL(file);
-      } else {
-        setFilePreview(null);
-      }
+      const selectedFiles = Array.from(e.target.files || []);
+      if (!selectedFiles.length) return;
+      const validFiles = selectedFiles.filter(f => {
+        if (f.size > 10 * 1024 * 1024) {
+          toast({ title: `"${f.name}" exceeds 10MB limit`, variant: "destructive" });
+          return false;
+        }
+        return true;
+      });
+      setAttachedFiles(prev => [...prev, ...validFiles]);
+      validFiles.forEach(file => {
+        if (file.type.startsWith("image/")) {
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            setFilePreviews(prev => new Map(prev).set(file.name + file.size, ev.target?.result as string));
+          };
+          reader.readAsDataURL(file);
+        }
+      });
       if (fileInputRef.current) fileInputRef.current.value = "";
     };
 
-    const removeFile = () => { setAttachedFile(null); setFilePreview(null); };
+    const removeFile = (index: number) => { setAttachedFiles(prev => prev.filter((_, i) => i !== index)); };
+    const clearFiles = () => { setAttachedFiles([]); setFilePreviews(new Map()); };
 
     const handleSendChat = () => {
-      if ((!chatInput.trim() && !attachedFile) || !activeTicker || tacticalChatMutation.isPending) return;
+      if ((!chatInput.trim() && attachedFiles.length === 0) || !activeTicker || tacticalChatMutation.isPending) return;
 
       const currentInput = chatInput;
-      const currentFile = attachedFile;
+      const currentFiles = [...attachedFiles];
+      const fileNames = currentFiles.map(f => f.name).join(", ");
       const optimisticUserMsg: ChatMsg = {
         id: Date.now(),
         role: "user",
-        content: currentInput + (currentFile ? ` [File: ${currentFile.name}]` : ""),
+        content: currentInput + (currentFiles.length > 0 ? ` [${currentFiles.length} file${currentFiles.length > 1 ? "s" : ""}: ${fileNames}]` : ""),
         createdAt: new Date().toISOString(),
         tickerId: activeTicker.id,
         userId: "",
       };
 
       setChatInput("");
-      removeFile();
+      clearFiles();
       setOptimisticMessages([optimisticUserMsg]);
       setIsAiLoading(true);
-      tacticalChatMutation.mutate({ content: currentInput, file: currentFile || undefined });
+      tacticalChatMutation.mutate({ content: currentInput, files: currentFiles.length > 0 ? currentFiles : undefined });
     };
 
     const tacticalMessages = [...messages.slice(-10), ...optimisticMessages];
@@ -224,19 +234,31 @@ export const ActionDashboard = forwardRef<ActionDashboardHandle, ActionDashboard
               </ScrollArea>
 
               <div className="border-t border-border p-2 bg-card/30 shrink-0">
-                {attachedFile && (
-                  <div className="mb-1.5 flex items-center gap-1">
-                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0.5 flex items-center gap-1">
-                      {filePreview ? (
-                        <img src={filePreview} alt="" className="h-4 w-4 rounded object-cover" />
-                      ) : (
-                        <ImageIcon className="h-3 w-3" />
-                      )}
-                      <span className="max-w-[120px] truncate">{attachedFile.name}</span>
-                      <button onClick={removeFile} className="hover:text-destructive" data-testid="button-tactical-remove-file">
-                        <X className="h-3 w-3" />
-                      </button>
-                    </Badge>
+                {attachedFiles.length > 0 && (
+                  <div className="mb-1.5">
+                    <div className="flex gap-1.5 overflow-x-auto pb-1">
+                      {attachedFiles.map((file, idx) => {
+                        const preview = filePreviews.get(file.name + file.size);
+                        return (
+                          <div key={`${file.name}-${idx}`} className="relative shrink-0 group" data-testid={`tactical-file-thumb-${idx}`}>
+                            <div className="w-10 h-10 rounded border border-border bg-muted/30 flex items-center justify-center overflow-hidden">
+                              {preview ? (
+                                <img src={preview} alt={file.name} className="w-full h-full object-cover" />
+                              ) : (
+                                <FileText className="h-4 w-4 text-muted-foreground" />
+                              )}
+                            </div>
+                            <button
+                              onClick={() => removeFile(idx)}
+                              className="absolute -top-1 -right-1 h-3.5 w-3.5 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                              data-testid={`button-tactical-remove-file-${idx}`}
+                            >
+                              <X className="h-2 w-2" />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
                 <div className="flex gap-1.5">
@@ -245,18 +267,24 @@ export const ActionDashboard = forwardRef<ActionDashboardHandle, ActionDashboard
                     type="file"
                     accept=".png,.jpg,.jpeg,.pdf,.csv"
                     onChange={handleFileChange}
+                    multiple
                     className="hidden"
                     data-testid="input-tactical-file"
                   />
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+                    className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground relative"
                     onClick={() => fileInputRef.current?.click()}
                     disabled={tacticalChatMutation.isPending}
                     data-testid="button-tactical-attach"
                   >
                     <Paperclip className="h-3.5 w-3.5" />
+                    {attachedFiles.length > 0 && (
+                      <span className="absolute -top-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-primary text-[8px] font-bold text-primary-foreground flex items-center justify-center">
+                        {attachedFiles.length}
+                      </span>
+                    )}
                   </Button>
                   <Textarea
                     value={chatInput}
@@ -264,7 +292,7 @@ export const ActionDashboard = forwardRef<ActionDashboardHandle, ActionDashboard
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendChat(); }
                     }}
-                    placeholder="Drop chart or ask..."
+                    placeholder={attachedFiles.length > 0 ? "Add context about these files..." : "Drop charts or ask..."}
                     className="min-h-[36px] max-h-[80px] text-xs resize-none bg-transparent border-border"
                     data-testid="input-tactical-chat"
                   />
@@ -272,7 +300,7 @@ export const ActionDashboard = forwardRef<ActionDashboardHandle, ActionDashboard
                     size="icon"
                     className="h-8 w-8 shrink-0"
                     onClick={handleSendChat}
-                    disabled={(!chatInput.trim() && !attachedFile) || tacticalChatMutation.isPending || !activeTicker}
+                    disabled={(!chatInput.trim() && attachedFiles.length === 0) || tacticalChatMutation.isPending || !activeTicker}
                     data-testid="button-tactical-send"
                   >
                     <Send className="h-3.5 w-3.5" />

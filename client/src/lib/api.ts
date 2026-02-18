@@ -104,11 +104,11 @@ export async function toggleChecklistItem(id: number, isCompleted: boolean): Pro
   return res.json();
 }
 
-export async function sendChatMessage(tickerId: number, content: string, file?: File): Promise<{ userMessage: ChatMsg; aiMessage: ChatMsg; createdNoteId?: number | null }> {
+export async function sendChatMessage(tickerId: number, content: string, files?: File[]): Promise<{ userMessage: ChatMsg; aiMessage: ChatMsg; createdNoteId?: number | null }> {
   const formData = new FormData();
   formData.append("content", content);
-  if (file) {
-    formData.append("file", file);
+  if (files && files.length > 0) {
+    files.forEach(f => formData.append("files", f));
   }
   const res = await fetch(`/api/tickers/${tickerId}/chat`, {
     method: "POST",
@@ -207,9 +207,9 @@ export interface Playbook {
   createdAt: string;
 }
 
-export async function analyzeDocument(tickerId: number, file: File, content?: string): Promise<Playbook> {
+export async function analyzeDocument(tickerId: number, files: File[], content?: string): Promise<Playbook> {
   const formData = new FormData();
-  formData.append("file", file);
+  files.forEach(f => formData.append("files", f));
   formData.append("tickerId", String(tickerId));
   if (content) formData.append("content", content);
   const res = await fetch("/api/analyze-document", {
@@ -265,10 +265,12 @@ export async function deleteJournalEntry(id: number): Promise<void> {
   await apiRequest("DELETE", `/api/journal/${id}`);
 }
 
-export async function sendTacticalChat(tickerId: number, content: string, file?: File): Promise<{ userMessage: ChatMsg; aiMessage: ChatMsg }> {
+export async function sendTacticalChat(tickerId: number, content: string, files?: File[]): Promise<{ userMessage: ChatMsg; aiMessage: ChatMsg }> {
   const formData = new FormData();
   formData.append("content", content);
-  if (file) formData.append("file", file);
+  if (files && files.length > 0) {
+    files.forEach(f => formData.append("files", f));
+  }
   const res = await fetch(`/api/tickers/${tickerId}/tactical-chat`, {
     method: "POST",
     body: formData,

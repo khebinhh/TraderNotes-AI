@@ -59,8 +59,8 @@ interface StrategyRoomProps {
 
 export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, onSelectNote, onAddToChart }: StrategyRoomProps) {
   const [input, setInput] = useState("");
-  const [attachedFile, setAttachedFile] = useState<File | null>(null);
-  const [filePreview, setFilePreview] = useState<string | null>(null);
+  const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+  const [filePreviews, setFilePreviews] = useState<Map<string, string>>(new Map());
   const [activePlaybookId, setActivePlaybookId] = useState<number | null>(null);
   const [optimisticMessages, setOptimisticMessages] = useState<ChatMsg[]>([]);
   const [isAiLoading, setIsAiLoading] = useState(false);
@@ -84,8 +84,8 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
   const activePlaybook = playbooksList.find(p => p.id === activePlaybookId) || null;
 
   const chatMutation = useMutation({
-    mutationFn: ({ content, file }: { content: string; file?: File }) =>
-      sendChatMessage(activeTicker!.id, content, file),
+    mutationFn: ({ content, files }: { content: string; files?: File[] }) =>
+      sendChatMessage(activeTicker!.id, content, files),
     onSuccess: (data) => {
       setOptimisticMessages([]);
       setIsAiLoading(false);
@@ -102,8 +102,8 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
   });
 
   const analyzeMutation = useMutation({
-    mutationFn: ({ file, content }: { file: File; content?: string }) =>
-      analyzeDocument(activeTicker!.id, file, content),
+    mutationFn: ({ files, content }: { files: File[]; content?: string }) =>
+      analyzeDocument(activeTicker!.id, files, content),
     onSuccess: (playbook) => {
       setOptimisticMessages([]);
       setIsAiLoading(false);
@@ -161,62 +161,72 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
   }, [messages, optimisticMessages, isAiLoading, activePlaybook]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (file.size > MAX_FILE_SIZE) {
-      alert("File size must be under 10MB");
-      return;
-    }
-    setAttachedFile(file);
-    if (file.type.startsWith("image/")) {
-      const reader = new FileReader();
-      reader.onload = (ev) => setFilePreview(ev.target?.result as string);
-      reader.readAsDataURL(file);
-    } else {
-      setFilePreview(null);
-    }
+    const selectedFiles = Array.from(e.target.files || []);
+    if (!selectedFiles.length) return;
+    const validFiles = selectedFiles.filter(f => {
+      if (f.size > MAX_FILE_SIZE) {
+        toast({ title: `"${f.name}" exceeds 10MB limit`, variant: "destructive" });
+        return false;
+      }
+      return true;
+    });
+    setAttachedFiles(prev => [...prev, ...validFiles]);
+    validFiles.forEach(file => {
+      if (file.type.startsWith("image/")) {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          setFilePreviews(prev => new Map(prev).set(file.name + file.size, ev.target?.result as string));
+        };
+        reader.readAsDataURL(file);
+      }
+    });
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  const removeFile = () => {
-    setAttachedFile(null);
-    setFilePreview(null);
+  const removeFile = (index: number) => {
+    setAttachedFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const clearFiles = () => {
+    setAttachedFiles([]);
+    setFilePreviews(new Map());
   };
 
   const handleSend = (mode?: "playbook" | "chat") => {
-    if ((!input.trim() && !attachedFile) || !activeTicker) return;
+    if ((!input.trim() && attachedFiles.length === 0) || !activeTicker) return;
     if (chatMutation.isPending || analyzeMutation.isPending) return;
 
     const currentInput = input;
-    const currentFile = attachedFile;
+    const currentFiles = [...attachedFiles];
+    const fileNames = currentFiles.map(f => f.name).join(", ");
     const optimisticUserMsg: ChatMsg = {
       id: Date.now(),
       role: "user",
-      content: currentInput + (currentFile ? ` [File: ${currentFile.name}]` : ""),
+      content: currentInput + (currentFiles.length > 0 ? ` [${currentFiles.length} file${currentFiles.length > 1 ? "s" : ""}: ${fileNames}]` : ""),
       createdAt: new Date().toISOString(),
       tickerId: activeTicker.id,
       userId: "",
     };
 
     setInput("");
-    removeFile();
+    clearFiles();
 
-    if (currentFile && mode === "playbook") {
+    if (currentFiles.length > 0 && mode === "playbook") {
       setOptimisticMessages([optimisticUserMsg]);
       setIsAiLoading(true);
-      analyzeMutation.mutate({ file: currentFile, content: currentInput || undefined });
-    } else if (currentFile && mode === "chat") {
+      analyzeMutation.mutate({ files: currentFiles, content: currentInput || undefined });
+    } else if (currentFiles.length > 0 && mode === "chat") {
       setOptimisticMessages([optimisticUserMsg]);
       setIsAiLoading(true);
-      chatMutation.mutate({ content: currentInput || `Analyze this file: ${currentFile.name}`, file: currentFile });
-    } else if (currentFile) {
+      chatMutation.mutate({ content: currentInput || `Analyze these files: ${fileNames}`, files: currentFiles });
+    } else if (currentFiles.length > 0) {
       setOptimisticMessages([optimisticUserMsg]);
       setIsAiLoading(true);
-      analyzeMutation.mutate({ file: currentFile, content: currentInput || undefined });
+      analyzeMutation.mutate({ files: currentFiles, content: currentInput || undefined });
     } else {
       setOptimisticMessages([optimisticUserMsg]);
       setIsAiLoading(true);
-      chatMutation.mutate({ content: currentInput, file: undefined });
+      chatMutation.mutate({ content: currentInput, files: undefined });
     }
   };
 
@@ -608,23 +618,43 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
 
             <div className="border-t border-border p-4 bg-card/30 shrink-0">
               <div className="max-w-3xl mx-auto">
-                {attachedFile && (
-                  <div className="mb-2 flex items-center gap-2" data-testid="file-attachment-badge">
-                    <Badge variant="secondary" className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium bg-primary/10 border border-primary/20">
-                      {filePreview ? (
-                        <img src={filePreview} alt="preview" className="h-6 w-6 rounded object-cover" />
-                      ) : (
-                        getFileIcon(attachedFile)
-                      )}
-                      <span className="max-w-[200px] truncate">{attachedFile.name}</span>
-                      <span className="text-muted-foreground">({(attachedFile.size / 1024).toFixed(0)}KB)</span>
-                      <button onClick={removeFile} className="ml-1 hover:text-destructive transition-colors" data-testid="button-remove-file">
-                        <X className="h-3.5 w-3.5" />
-                      </button>
-                    </Badge>
-                    <Badge variant="outline" className="text-[9px] border-amber-500/30 text-amber-400">
-                      Choose action below
-                    </Badge>
+                {attachedFiles.length > 0 && (
+                  <div className="mb-2" data-testid="file-attachment-grid">
+                    <div className="flex items-center gap-1.5 mb-1.5">
+                      <Badge variant="outline" className="text-[9px] border-primary/30 text-primary font-mono">
+                        {attachedFiles.length} file{attachedFiles.length > 1 ? "s" : ""} staged
+                      </Badge>
+                      <Badge variant="outline" className="text-[9px] border-amber-500/30 text-amber-400">
+                        Choose action below
+                      </Badge>
+                    </div>
+                    <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-thin">
+                      {attachedFiles.map((file, idx) => {
+                        const preview = filePreviews.get(file.name + file.size);
+                        return (
+                          <div key={`${file.name}-${idx}`} className="relative shrink-0 group" data-testid={`file-thumb-${idx}`}>
+                            <div className="w-16 h-16 rounded-lg border border-border bg-muted/30 flex items-center justify-center overflow-hidden">
+                              {preview ? (
+                                <img src={preview} alt={file.name} className="w-full h-full object-cover" />
+                              ) : (
+                                <div className="flex flex-col items-center gap-0.5">
+                                  <FileText className="h-5 w-5 text-muted-foreground" />
+                                  <span className="text-[8px] text-muted-foreground uppercase">{file.name.split('.').pop()}</span>
+                                </div>
+                              )}
+                            </div>
+                            <button
+                              onClick={() => removeFile(idx)}
+                              className="absolute -top-1.5 -right-1.5 h-4 w-4 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                              data-testid={`button-remove-file-${idx}`}
+                            >
+                              <X className="h-2.5 w-2.5" />
+                            </button>
+                            <p className="text-[8px] text-muted-foreground/70 mt-0.5 max-w-[64px] truncate text-center">{file.name}</p>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
                 <div className="relative rounded-xl border border-input bg-card shadow-sm transition-shadow focus-within:shadow-[0_0_0_2px_hsl(var(--primary)/0.15)]">
@@ -638,9 +668,9 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
                       }
                     }}
                     placeholder={activeTicker
-                      ? attachedFile
-                        ? "Optional: Add context about this document..."
-                        : `Drop a PDF for a Trading Playbook, or ask about ${activeTicker.symbol}...`
+                      ? attachedFiles.length > 0
+                        ? "Optional: Add context about these documents..."
+                        : `Drop PDFs/charts for a Trading Playbook, or ask about ${activeTicker.symbol}...`
                       : "Select a ticker first..."}
                     disabled={!activeTicker}
                     className="min-h-[80px] w-full resize-none bg-transparent border-0 focus-visible:ring-0 p-4 text-sm placeholder:text-muted-foreground/40 font-medium"
@@ -651,6 +681,7 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
                     type="file"
                     accept={ACCEPTED_FILE_TYPES}
                     onChange={handleFileChange}
+                    multiple
                     className="hidden"
                     data-testid="input-file-upload"
                   />
@@ -662,19 +693,24 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
                             <Button
                               variant="ghost"
                               size="icon"
-                              className={cn("h-8 w-8 text-muted-foreground hover:text-foreground", attachedFile && "text-primary")}
+                              className={cn("h-8 w-8 text-muted-foreground hover:text-foreground relative", attachedFiles.length > 0 && "text-primary")}
                               onClick={() => fileInputRef.current?.click()}
                               disabled={!activeTicker || isProcessing}
                               data-testid="button-attach"
                             >
                               <Paperclip className="h-4 w-4" />
+                              {attachedFiles.length > 0 && (
+                                <span className="absolute -top-0.5 -right-0.5 h-4 w-4 rounded-full bg-primary text-[9px] font-bold text-primary-foreground flex items-center justify-center" data-testid="badge-file-count">
+                                  {attachedFiles.length}
+                                </span>
+                              )}
                             </Button>
                           </TooltipTrigger>
-                          <TooltipContent>Attach PDF, Chart, or CSV for Playbook generation</TooltipContent>
+                          <TooltipContent>Attach PDFs, Charts, or CSVs (multiple allowed)</TooltipContent>
                         </Tooltip>
                       </TooltipProvider>
                     </div>
-                    {attachedFile ? (
+                    {attachedFiles.length > 0 ? (
                       <div className="flex items-center gap-2">
                         <Button
                           size="sm"
