@@ -2,7 +2,7 @@ import { useState } from "react";
 import {
   TrendingUp, TrendingDown, Minus, AlertTriangle, Calendar, CheckSquare,
   Square, ChevronDown, ChevronUp, Shield, Zap, Eye, MessageSquare, Save,
-  Clock, Star, Filter, History, Users
+  Clock, Star, Filter, History, Users, Trash2
 } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
@@ -18,7 +18,9 @@ interface PlaybookDashboardProps {
   playbook: Playbook;
   onSaveReview?: (id: number, review: string) => void;
   onAddToChart?: (price: number, label: string, color: string) => void;
+  onDelete?: (id: number) => void;
   isSavingReview?: boolean;
+  isDeleting?: boolean;
 }
 
 function BiasIcon({ bias }: { bias: string }) {
@@ -254,12 +256,13 @@ function TacticalUpdatesLog({ updates }: { updates: TacticalUpdate[] }) {
   );
 }
 
-export function PlaybookDashboard({ playbook, onSaveReview, onAddToChart, isSavingReview }: PlaybookDashboardProps) {
+export function PlaybookDashboard({ playbook, onSaveReview, onAddToChart, onDelete, isSavingReview, isDeleting }: PlaybookDashboardProps) {
   const data: PlaybookData = playbook.playbookData as PlaybookData;
   const [checkedScenarios, setCheckedScenarios] = useState<Set<string>>(new Set());
   const [showThesis, setShowThesis] = useState(true);
   const [reviewText, setReviewText] = useState(playbook.userReview || "");
   const [showReview, setShowReview] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const toggleScenario = (id: string) => {
     setCheckedScenarios(prev => {
@@ -539,6 +542,52 @@ export function PlaybookDashboard({ playbook, onSaveReview, onAddToChart, isSavi
               <Save className="h-3.5 w-3.5" />
               {isSavingReview ? "Saving..." : "Save Review"}
             </Button>
+          </div>
+        )}
+
+        {onDelete && (
+          <div className="mt-8 border border-red-500/20 rounded-lg bg-red-500/5 p-4" data-testid="section-danger-zone">
+            <h3 className="text-sm font-bold text-red-400 mb-1 flex items-center gap-2">
+              <Trash2 className="h-4 w-4" />
+              Workspace Settings
+            </h3>
+            <p className="text-[11px] text-muted-foreground mb-3">
+              Manage Playbook: Generated on {new Date(playbook.createdAt).toLocaleDateString()} by AI Agent. Use this to clean up your dashboard history.
+            </p>
+            {!confirmDelete ? (
+              <Button
+                variant="outline"
+                size="sm"
+                className="border-red-500/30 text-red-400 hover:bg-red-500/10 hover:text-red-300 gap-1.5"
+                onClick={() => setConfirmDelete(true)}
+                data-testid="button-delete-playbook"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Delete this Playbook
+              </Button>
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-red-400 italic">Are you sure? This cannot be undone.</span>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className="gap-1.5"
+                  onClick={() => onDelete(playbook.id)}
+                  disabled={isDeleting}
+                  data-testid="button-confirm-delete"
+                >
+                  {isDeleting ? "Deleting..." : "Confirm Delete"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setConfirmDelete(false)}
+                  data-testid="button-cancel-delete"
+                >
+                  Cancel
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </div>

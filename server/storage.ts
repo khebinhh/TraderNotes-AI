@@ -57,6 +57,7 @@ export interface IStorage {
   createPlaybook(playbook: InsertPlaybook): Promise<Playbook>;
   updatePlaybook(id: number, userId: string, data: Partial<InsertPlaybook>): Promise<Playbook | undefined>;
   updatePlaybookReview(id: number, userId: string, review: string): Promise<Playbook | undefined>;
+  deletePlaybook(id: number, userId: string): Promise<boolean>;
 
   getJournalEntries(tickerId: number, userId: string): Promise<JournalEntry[]>;
   createJournalEntry(entry: InsertJournalEntry): Promise<JournalEntry>;
@@ -248,6 +249,13 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(playbooks.id, id), eq(playbooks.userId, userId)))
       .returning();
     return updated;
+  }
+
+  async deletePlaybook(id: number, userId: string): Promise<boolean> {
+    const [deleted] = await db.delete(playbooks)
+      .where(and(eq(playbooks.id, id), eq(playbooks.userId, userId)))
+      .returning();
+    return !!deleted;
   }
 
   async getJournalEntries(tickerId: number, userId: string): Promise<JournalEntry[]> {

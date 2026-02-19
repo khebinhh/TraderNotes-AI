@@ -336,6 +336,11 @@ export async function updatePlaybookReview(id: number, review: string): Promise<
   return res.json();
 }
 
+export async function deletePlaybook(id: number): Promise<void> {
+  const res = await apiRequest("DELETE", `/api/playbooks/${id}`);
+  if (!res.ok) throw new Error("Failed to delete playbook");
+}
+
 export async function pinMessageToPlaybook(playbookId: number, messageId: number): Promise<Playbook> {
   const res = await apiRequest("POST", `/api/playbooks/${playbookId}/pin-message`, { messageId });
   return res.json();

@@ -9,11 +9,11 @@ import { Badge } from "@/components/ui/badge";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchChatByTicker, sendChatMessage, analyzeDocument, fetchPlaybooks, updatePlaybookReview,
-  fetchJournalEntries, createJournalEntry, deleteJournalEntry, pinMessageToPlaybook,
+  fetchJournalEntries, createJournalEntry, deleteJournalEntry, pinMessageToPlaybook, deletePlaybook,
   type FullNote, type ChatMsg, type TickerData, type NoteData, type Playbook, type JournalEntry, type TacticalBriefing as TacticalBriefingData
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { format } from "date-fns";
+import { format, isToday, isYesterday } from "date-fns";
 import { PlaybookDashboard } from "./PlaybookDashboard";
 import { TacticalBriefing } from "./TacticalBriefing";
 import { PostMarketRecap } from "./PostMarketRecap";
@@ -160,6 +160,19 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/tickers", activeTicker?.id, "playbooks"] });
       toast({ title: "Pinned to Playbook", description: "Chat message pinned to your active playbook" });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => deletePlaybook(id),
+    onSuccess: (_data, deletedId) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/tickers", activeTicker?.id, "playbooks"] });
+      const remaining = playbooksList.filter(p => p.id !== deletedId);
+      setActivePlaybookId(remaining.length > 0 ? remaining[0].id : null);
+      toast({ title: "Playbook Deleted", description: "The playbook has been removed from your workspace" });
+    },
+    onError: () => {
+      toast({ title: "Delete Failed", description: "Could not delete the playbook. Please try again.", variant: "destructive" });
     },
   });
 
@@ -387,7 +400,7 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
                             {isPbPinned ? "In Playbook" : "Playbook"}
                           </button>
                         </TooltipTrigger>
-                        <TooltipContent>{isPbPinned ? "Already pinned to playbook" : `Pin to ${targetPb?.title || "playbook"}`}</TooltipContent>
+                        <TooltipContent>{isPbPinned ? "Already pinned to playbook" : "Pin to playbook"}</TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
                   );
@@ -454,6 +467,39 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
             {playbooksList.length > 0 && (() => {
               const weeklyPlaybooks = playbooksList.filter(p => (p.horizonType || (p.playbookData as any)?.metadata?.horizon_type) === "Weekly");
               const dailyPlaybooks = playbooksList.filter(p => (p.horizonType || (p.playbookData as any)?.metadata?.horizon_type) !== "Weekly");
+
+              const getDateLabel = (date: Date) => {
+                if (isToday(date)) return "Today";
+                if (isYesterday(date)) return "Yesterday";
+                return format(date, "MMM d");
+              };
+
+              const groupByDate = (pbs: Playbook[]) => {
+                const groups: Record<string, Playbook[]> = {};
+                pbs.forEach(pb => {
+                  const label = getDateLabel(new Date(pb.createdAt));
+                  if (!groups[label]) groups[label] = [];
+                  groups[label].push(pb);
+                });
+                return groups;
+              };
+
+              const getTopicName = (pb: Playbook) => {
+                const pbData = pb.playbookData as any;
+                const meta = pbData?.metadata;
+                if (meta?.session_summary) return meta.session_summary;
+                if (meta?.report_title && meta.report_title.length <= 40) return meta.report_title;
+                const bias = pbData?.bias || pbData?.thesis?.bias;
+                const theme = pbData?.macro_theme || meta?.report_title;
+                if (theme && bias) {
+                  const short = theme.length > 30 ? theme.slice(0, 28) + "…" : theme;
+                  return `${short} — ${bias}`;
+                }
+                if (theme) return theme.length > 40 ? theme.slice(0, 38) + "…" : theme;
+                if (bias) return `${activeTicker?.symbol || "Session"} ${bias}`;
+                return "Analysis";
+              };
+
               const authorBadge = (author: string | null | undefined) => {
                 if (!author) return null;
                 const isIzzy = author.toLowerCase().includes("izzy");
@@ -463,44 +509,59 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
                 if (isPharmD) return <span className="inline-flex items-center gap-0.5 text-[8px] font-mono text-cyan-400"><span className="w-1.5 h-1.5 rounded-full bg-cyan-400 inline-block" />PharmD</span>;
                 return <span className="text-[8px] font-mono text-muted-foreground">{author}</span>;
               };
+
+              const isActive = (id: number) => activePlaybookId === id;
+
               const renderPlaybookItem = (pb: Playbook) => {
                 const pbData = pb.playbookData as any;
                 const meta = pbData.metadata;
-                const horizon = pb.targetDateStart || meta?.target_horizon || format(new Date(pb.createdAt), "MMM d");
                 const author = pb.author || meta?.author;
                 const updateCount = Array.isArray(pbData.tactical_updates) ? pbData.tactical_updates.length : 0;
+                const active = isActive(pb.id);
                 return (
                   <button
                     key={pb.id}
-                    onClick={() => setActivePlaybookId(activePlaybookId === pb.id ? null : pb.id)}
+                    onClick={() => setActivePlaybookId(active ? null : pb.id)}
                     data-testid={`button-playbook-${pb.id}`}
                     className={cn(
                       "w-full text-left px-3 py-2 rounded-lg text-sm transition-all group",
-                      activePlaybookId === pb.id
-                        ? "bg-primary/10 border border-primary/20 text-foreground"
-                        : "hover:bg-muted/50 text-muted-foreground hover:text-foreground"
+                      active
+                        ? "bg-amber-500/10 border border-amber-400/40 text-foreground shadow-[0_0_12px_-4px_rgba(251,191,36,0.25)]"
+                        : "hover:bg-muted/50 text-muted-foreground hover:text-foreground border border-transparent"
                     )}
                   >
                     <div className="flex items-center justify-between gap-1">
-                      <span className="font-medium truncate text-xs">
-                        {horizon} — {pbData.bias || pbData.thesis?.bias || "Open"}
+                      <span className={cn("font-medium truncate text-xs", active && "text-amber-200")}>
+                        {getTopicName(pb)}
                       </span>
                       <div className="flex items-center gap-1.5 shrink-0">
                         {updateCount > 0 && (
                           <span className="text-[8px] font-mono text-amber-400 bg-amber-500/10 px-1 rounded">+{updateCount}</span>
                         )}
-                        {activePlaybookId === pb.id && <ChevronRight className="h-3 w-3 text-primary" />}
+                        {active && <ChevronRight className="h-3 w-3 text-amber-400" />}
                       </div>
                     </div>
                     <div className="flex items-center gap-2 mt-0.5">
                       {authorBadge(author)}
                       <span className="text-[10px] text-muted-foreground">
-                        {pbData.macro_theme || meta?.report_title || "Analysis"}
+                        {format(new Date(pb.createdAt), "h:mm a")}
                       </span>
                     </div>
                   </button>
                 );
               };
+
+              const renderDateGroup = (label: string, pbs: Playbook[]) => (
+                <div key={label} className="mb-1">
+                  <div className="px-2 py-1 text-[9px] font-mono text-muted-foreground/60 uppercase tracking-widest">
+                    {label}
+                  </div>
+                  {pbs.map(renderPlaybookItem)}
+                </div>
+              );
+
+              const dailyGroups = groupByDate(dailyPlaybooks);
+
               return (
                 <>
                   {weeklyPlaybooks.length > 0 && (
@@ -518,7 +579,7 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
                         <BookOpen className="h-3 w-3" />
                         {weeklyPlaybooks.length > 0 ? "Daily Tactics" : "Playbooks"}
                       </div>
-                      {dailyPlaybooks.map(renderPlaybookItem)}
+                      {Object.entries(dailyGroups).map(([label, pbs]) => renderDateGroup(label, pbs))}
                     </div>
                   )}
                 </>
@@ -635,7 +696,9 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
             playbook={activePlaybook}
             onSaveReview={(id, review) => reviewMutation.mutate({ id, review })}
             onAddToChart={onAddToChart}
+            onDelete={(id) => deleteMutation.mutate(id)}
             isSavingReview={reviewMutation.isPending}
+            isDeleting={deleteMutation.isPending}
           />
         ) : (
           <>

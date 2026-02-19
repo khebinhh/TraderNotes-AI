@@ -995,6 +995,15 @@ Only suggest tickers that are NOT "${ticker.symbol}" (the current workspace).`;
     res.json(updated);
   });
 
+  app.delete("/api/playbooks/:id", isAuthenticated, async (req, res) => {
+    const userId = getUserId(res);
+    const id = parseInt(req.params.id as string);
+    if (isNaN(id)) return res.status(400).json({ message: "Invalid playbook id" });
+    const deleted = await storage.deletePlaybook(id, userId);
+    if (!deleted) return res.status(404).json({ message: "Playbook not found" });
+    res.json({ success: true });
+  });
+
   app.post("/api/playbooks/:id/pin-message", isAuthenticated, async (req, res) => {
     const userId = getUserId(res);
     const id = parseInt(req.params.id as string);
