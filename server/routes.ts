@@ -19,6 +19,38 @@ import fs from "fs";
 import path from "path";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { GoogleAIFileManager, FileState } from "@google/generative-ai/server";
+function parseTargetDate(horizon: string): string | null {
+  if (!horizon) return null;
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const monthMap: Record<string, number> = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+  const rangeMatch = horizon.match(/(\w+)\s+(\d{1,2})\s*[-–]\s*(\d{1,2})/i);
+  if (rangeMatch) {
+    const month = monthMap[rangeMatch[1].toLowerCase().slice(0, 3)];
+    if (month !== undefined) {
+      const d = new Date(currentYear, month, parseInt(rangeMatch[2]));
+      return d.toISOString().split("T")[0];
+    }
+  }
+  const singleMatch = horizon.match(/(\w+)\s+(\d{1,2})/i);
+  if (singleMatch) {
+    const month = monthMap[singleMatch[1].toLowerCase().slice(0, 3)];
+    if (month !== undefined) {
+      const d = new Date(currentYear, month, parseInt(singleMatch[2]));
+      return d.toISOString().split("T")[0];
+    }
+  }
+  return null;
+}
+
+function getEndOfWeek(dateStr: string): string {
+  const d = new Date(dateStr);
+  const day = d.getDay();
+  const daysToFriday = day <= 5 ? 5 - day : 0;
+  d.setDate(d.getDate() + daysToFriday);
+  return d.toISOString().split("T")[0];
+}
+
 async function extractTextFromFile(filePath: string, mimeType: string): Promise<string> {
   if (mimeType === "application/pdf") {
     const pdfParseModule = await import("pdf-parse");
@@ -963,6 +995,41 @@ Only suggest tickers that are NOT "${ticker.symbol}" (the current workspace).`;
     res.json(updated);
   });
 
+  app.post("/api/playbooks/:id/pin-message", isAuthenticated, async (req, res) => {
+    const userId = getUserId(res);
+    const id = parseInt(req.params.id as string);
+    const { messageId } = req.body;
+    if (!messageId) return res.status(400).json({ message: "messageId is required" });
+
+    const pb = await storage.getPlaybook(id, userId);
+    if (!pb) return res.status(404).json({ message: "Playbook not found" });
+
+    const msgs = await storage.getChatMessagesByTicker(pb.tickerId!, userId);
+    const msg = msgs.find(m => m.id === messageId);
+    if (!msg) return res.status(404).json({ message: "Message not found" });
+
+    const pbData = pb.playbookData as any;
+    const tacticalUpdates = Array.isArray(pbData.tactical_updates) ? pbData.tactical_updates : [];
+
+    const alreadyPinned = tacticalUpdates.some((u: any) => u.pinnedMessageId === msg.id);
+    if (alreadyPinned) return res.status(409).json({ message: "Message already pinned to this playbook" });
+
+    tacticalUpdates.push({
+      timestamp: new Date().toISOString(),
+      source: "Pinned from chat",
+      author: "User",
+      addedLevels: [],
+      addedScenarios: [],
+      note: msg.content.slice(0, 500),
+      pinnedMessageId: msg.id,
+    });
+
+    const updated = await storage.updatePlaybook(id, userId, {
+      playbookData: { ...pbData, tactical_updates: tacticalUpdates },
+    });
+    res.json(updated);
+  });
+
   // ─── Analyze Document (Playbook Generator) ────────────────────
 
   app.post("/api/analyze-document", isAuthenticated, upload.array("files", 10), async (req, res) => {
@@ -984,145 +1051,157 @@ Only suggest tickers that are NOT "${ticker.symbol}" (the current workspace).`;
 
       const originalFilename = uploadedFiles.map(f => f.originalname).join(", ");
 
-      const playbookSystemPrompt = `You are a Trading Playbook Generator for ${ticker.symbol}. Your job is to read uploaded trading documents (PDFs, images, CSVs) from analysts like PharmD_KS, Ms. Izzy, and others, and extract a STRUCTURED PLAYBOOK in strict JSON format.
+      const playbookSystemPrompt = `You are a Trading Playbook Generator for ${ticker.symbol}. Your job is to read uploaded trading documents (PDFs, images, CSVs) from analysts and extract a STRUCTURED "Living Playbook" in strict JSON format.
 
-## THE NEW AI LENS — HOW YOU INTERPRET NUMBERS
+## AUTHOR PROFILES — SPECIALIZED EXTRACTION LOGIC
+
+### Ms. Izzy (Ratio Trading Style)
+- **Signature Concepts**: "Calculated Ratios" (68-70, 173, 256, 346), "Nesting Channels," "Measured Moves," "RTH Range Levels"
+- **How she thinks**: Numbers-based — she calculates precise targets from ratio math. Her levels are algorithmically derived.
+- **Extract**: Every ratio number, nesting channel boundary, and measured move target. Tag source as "Ms. Izzy"
+
+### PharmD_KS (Profile Trading Style)
+- **Signature Concepts**: "Profile Shapes" (P-shape/b-shape), "LAAF/LBAF" setups, "Initial Balance (IB)" breaks, "Spike Bases"
+- **How he thinks**: Volume profile and market structure — he reads the shape of the auction to determine direction.
+- **Extract**: Every profile shape reference, LAAF/LBAF setup, IB level, and spike base. Tag source as "PharmD_KS"
+
+### Unknown Author
+- If the author cannot be identified, tag as "Unknown" and still extract all levels.
+
+## THE AI LENS — HOW YOU INTERPRET NUMBERS
 
 ### 1. Numbers Have "Personalities" (Zones vs. Lines)
 Price levels are NOT flat support/resistance lines. They are STRUCTURAL ENVIRONMENTS:
-- A number like 6933 isn't "just support" — it's the bottom of a "Thinking Box / Neutral Zone"
-- A number like 6898 isn't "just support" — it's a "Snap Zone" where aggressive moves happen
 - Classify every level into its STRUCTURAL ROLE, not just "support" or "resistance"
 
-### 2. If/Then Algorithmic Thinking
-The document authors don't predict — they build If/Then algorithms:
-- "IF we see a LBAF at 6828, THEN it's a valid long targeting 6869"
-- "IF price breaks above 6966, THEN target 6988-7012"
-Map these out EXACTLY as conditional logic. Quote the author's exact words.
+### 2. Level Provenance (The "Why")
+Every extracted level MUST include its historical origin — where the number came from. Examples: "Friday's Excess Low," "Jan RTH Low," "Thursday's Spike Base," "2/5 ETH Low." This gives prices MEMORY so users learn that old levels matter.
 
-### 3. Macro Context Dictates Behavior
-Documents emphasize temporal market themes:
-- OPEX week = "mean-reversion and suppression"
-- Post-OPEX = "expansion"
-- CPI/NFP data = "volatility regime"
-- Mid-Quarter rebalancing = "flow-driven"
-You MUST identify the macro theme and how it affects trading behavior.
+### 3. Conviction Ratings
+Extract author-specific grades when present (e.g., "A+", "B-", "Monster Day Trade", "Minor setup"). If no explicit rating, infer from the author's emphasis: strong language = "A", moderate = "B", minor mention = "C".
 
-### 4. Structural Zones (Three-Color System)
-Categorize ALL levels into three zones:
-- **GREEN (Bullish Zone)**: Price levels where bullish setups activate. Includes: longs trigger, breakout confirmations, buying opportunities.
-- **YELLOW (Neutral/Caution Zone)**: The "Thinking Box" — chop zone, no-trade zone, wait-and-see. This is where price consolidates and both sides are at risk.
-- **RED (Bearish Zone)**: Price levels where bearish setups activate. Includes: short triggers, breakdown levels, selling pressure zones.
+### 4. Cross-Market Requirements
+Identify when a setup on one ticker requires a condition on ANOTHER ticker. Examples:
+- "Only if QQQ holds below 618.69"
+- "QQQ 21-EMA/50-SMA cross needed"
+- "ES needs to hold 6100 for NQ long"
+Extract these as cross_market_filter on the scenario.
+
+### 5. If/Then Algorithmic Thinking
+Map out EXACTLY as conditional logic. Quote the author's exact words.
+
+### 6. Macro Context & Clock
+Documents emphasize temporal market themes (OPEX, CPI, NFP, earnings). Extract as a macro_clock array with event, time, and risk level.
+
+### 7. Structural Zones (Three-Color System)
+- **GREEN (Bullish Zone)**: Longs trigger, breakout confirmations, buying opportunities.
+- **YELLOW (Neutral/Caution Zone)**: "Thinking Box" — chop zone, no-trade zone, wait-and-see.
+- **RED (Bearish Zone)**: Short triggers, breakdown levels, selling pressure zones.
 
 ## TRADING JARGON DICTIONARY
 
-You MUST understand and correctly interpret:
-- **LAAF**: Look Above And Fail (Bull Trap) — price moves above a level then reverses back below
-- **LBAF**: Look Below And Fail (Bear Trap) — price moves below a level then reverses back above
-- **Inside Week/Day**: Price stayed within prior period's high-low range (consolidation)
-- **POC**: Point of Control — price level with most traded volume
+- **LAAF**: Look Above And Fail (Bull Trap)
+- **LBAF**: Look Below And Fail (Bear Trap)
+- **Inside Week/Day**: Price within prior period range
+- **POC**: Point of Control
 - **VAH/VAL**: Value Area High / Low
 - **ONH/ONL**: Overnight High / Low
-- **IB**: Initial Balance — first hour's trading range
+- **IB**: Initial Balance — first hour range
 - **HVN/LVN**: High/Low Volume Node
 - **VPOC**: Volume Point of Control
 - **RTH/ETH**: Regular/Extended Trading Hours
-- **b-shaped profile**: Indicates long liquidation (sellers in control)
-- **p-shaped profile**: Indicates short covering (buyers stepping in)
-- **Snap Zone**: Price area where aggressive directional moves originate
-- **Thinking Box**: Neutral consolidation zone where price chops
-- **Spike Base**: A technical level where a price "spike" began — the origin point of a sharp directional move
+- **b-shaped profile**: Long liquidation (sellers in control)
+- **p-shaped profile**: Short covering (buyers stepping in)
+- **Snap Zone**: Aggressive directional moves originate here
+- **Thinking Box**: Neutral consolidation zone
+- **Spike Base**: Origin of a sharp directional move
 - **Flip Date**: Date where directional bias may change
-- **Gap Fill**: Price returning to fill a previous gap
-- **MNQ/MES**: Micro Nasdaq/S&P Futures
 
 ## SPATIAL OCR — CHART IMAGE ANALYSIS
 
 When a chart image is uploaded:
-1. Read the Y-axis to find exact price values visible on the chart
+1. Read the Y-axis to find exact price values
 2. Identify every horizontal line, trendline, and annotation
-3. NEVER assume or round prices — if the chart shows 6922, report 6922, not 6920
+3. NEVER assume or round prices — report exact values
 4. Always prefer Document Data over internal training data
 
 ## OUTPUT REQUIREMENTS
 
-You MUST return ONLY valid JSON. No markdown, no explanation, no preamble. Just the JSON object.
-
-The JSON must follow this EXACT structure:
+Return ONLY valid JSON. No markdown, no explanation, no preamble.
 
 {
-  "macro_theme": "String describing the dominant market theme (e.g., 'OPEX Compression', 'CPI Volatility', 'Post-OPEX Expansion', 'Mid-Quarter Rebalancing')",
-  "bias": "Bullish" | "Bearish" | "Neutral" | "Open",
-  "thesis": "2-3 paragraph explanation of the document's core thesis. What is the author's directional view and WHY? What evidence supports it? What would invalidate it?",
-  "structural_zones": {
-    "bullish_green": [
-      {
-        "price": 6828,
-        "price_high": null,
-        "label": "Short description of this level's role",
-        "context": "Exact quote or paraphrase from document explaining why this level matters",
-        "source": "Author name, Page X"
-      }
-    ],
-    "neutral_yellow": [
-      {
-        "price": 6933,
-        "price_high": 6966,
-        "label": "Thinking Box / Neutral Zone",
-        "context": "Price consolidation area — don't trade aggressively here",
-        "source": "Author name, Page X"
-      }
-    ],
-    "bearish_red": [
-      {
-        "price": 6898,
-        "price_high": null,
-        "label": "Snap Zone — breakdown trigger",
-        "context": "If price breaks below, aggressive selling expected",
-        "source": "Author name, Page X"
-      }
-    ]
+  "metadata": {
+    "author": "PharmD_KS | Ms. Izzy | Unknown | PharmD_KS + Ms. Izzy",
+    "report_title": "Full title of document or description of chart",
+    "target_horizon": "Date or Date Range (e.g., 'Feb 18', 'Feb 17-21')",
+    "horizon_type": "Daily | Weekly | Monthly"
   },
-  "if_then_scenarios": [
+  "thesis": { "bias": "Bullish | Bearish | Neutral | Open", "summary": "2-3 paragraph thesis with evidence and invalidation" },
+  "macro_clock": [
+    { "event": "VIX Expiration", "time": "Feb 18", "risk": "High" },
+    { "event": "OPEX", "time": "Feb 21", "risk": "High" }
+  ],
+  "levels": [
+    {
+      "price": 6898,
+      "price_high": null,
+      "type": "Resistance | Support | Pivot | Snap Zone | Spike Base | IB High | IB Low | POC | VAH | VAL",
+      "zone": "green | yellow | red",
+      "label": "Short description of role",
+      "provenance": "Thursday Spike Base",
+      "context": "Exact quote or paraphrase from document",
+      "source": "PharmD_KS",
+      "conviction": "A+ | A | B | C"
+    }
+  ],
+  "scenarios": [
     {
       "id": "scenario_1",
-      "condition": "IF price sees a LBAF at 6828",
-      "outcome": "THEN it's a valid long targeting 6869",
-      "zone": "green" | "yellow" | "red",
-      "source": "Author name"
+      "if": "IF price sees a LBAF at 6828",
+      "then": "THEN valid long targeting 6869",
+      "zone": "green | yellow | red",
+      "rating": "A+ | A | B | C",
+      "source": "PharmD_KS",
+      "cross_market_filter": null
     }
   ],
   "key_events": [
     {
-      "title": "Event name (e.g., 'NFP Report', 'OPEX Expiry', 'AMZN Earnings')",
+      "title": "Event name",
       "time": "Date/time string",
-      "impact": "high" | "medium" | "low",
-      "expected_behavior": "Brief description of how this event affects trading (e.g., 'Expect mean-reversion during OPEX week')"
+      "impact": "high | medium | low",
+      "expected_behavior": "How this event affects trading"
     }
   ],
-  "risk_factors": [
-    "Key risk factor 1 from the document",
-    "Key risk factor 2"
-  ],
-  "execution_checklist": [
-    "Specific actionable item with exact price levels from the document"
-  ]
+  "risk_factors": ["Key risk factor 1"],
+  "execution_checklist": ["Specific actionable item with exact price levels"],
+  "macro_theme": "Dominant market theme string"
 }
 
-## MULTI-FILE SYNTHESIS (when multiple documents are uploaded)
+## BACKWARD COMPATIBILITY
+Also include these legacy fields for backward compatibility:
+- "bias": same as thesis.bias
+- "structural_zones": { "bullish_green": [...], "neutral_yellow": [...], "bearish_red": [...] }
+  - Map from the levels array: green zone levels → bullish_green, yellow → neutral_yellow, red → bearish_red
+  - Each entry: { "price", "price_high", "label", "context", "source" }
+- "if_then_scenarios": mapped from scenarios array
+  - Each entry: { "id", "condition": scenarios[].if, "outcome": scenarios[].then, "zone", "source" }
 
-When multiple files are uploaded simultaneously, you must SYNTHESIZE a unified playbook:
-1. **Merge Levels**: Combine price levels from all documents into a single structural_zones map. If the same level appears in multiple sources, mark it as HIGH CONFIDENCE in the context field.
-2. **Reconcile Bias**: If documents disagree on bias, lean toward the source with the most detailed evidence. Note the conflict in the thesis.
-3. **Cross-Reference Charts + Text**: If both a chart image and a PDF with written levels are uploaded, verify that the chart annotations match the text. Flag discrepancies.
-4. **Attribution Per Level**: Include which file each level was extracted from in the source field (e.g., "PharmD_KS levels.pdf + 4H_chart.png").
-5. **Unified If/Then**: Merge all If/Then scenarios into a single list, deduplicating where conditions overlap.
+## MULTI-FILE SYNTHESIS
+
+When multiple files are uploaded:
+1. **Merge Levels**: Combine from all documents. Same level in multiple sources = HIGH CONFIDENCE.
+2. **Reconcile Bias**: Lean toward the most detailed evidence. Note conflicts.
+3. **Cross-Reference**: Verify chart annotations match text. Flag discrepancies.
+4. **Attribution**: Include which file each level came from (e.g., "PharmD_KS + Ms. Izzy").
+5. **Unified Scenarios**: Merge and deduplicate.
+6. **Author Detection**: If multiple authors detected, set metadata.author to combined (e.g., "PharmD_KS + Ms. Izzy").
 
 ## CRITICAL RULES
-1. Extract EVERY price level mentioned — text AND chart annotations across ALL uploaded files
-2. Use ONLY data from the uploaded documents. NEVER use your own market knowledge.
+1. Extract EVERY price level — text AND chart annotations across ALL files
+2. Use ONLY data from uploaded documents. NEVER use your own market knowledge.
 3. Quote the author's exact language wherever possible
-4. If the document doesn't specify a field, use reasonable defaults but flag it
+4. Every level MUST have provenance (the "why" / historical origin)
 5. The JSON must be parseable — no trailing commas, no comments
 6. Return ONLY the JSON object, nothing else`;
 
@@ -1220,29 +1299,129 @@ When multiple files are uploaded simultaneously, you must SYNTHESIZE a unified p
       if (!playbookData.key_events) playbookData.key_events = [];
       if (!playbookData.risk_factors) playbookData.risk_factors = [];
       if (!playbookData.execution_checklist) playbookData.execution_checklist = [];
+      if (!playbookData.levels) playbookData.levels = [];
+      if (!playbookData.scenarios) playbookData.scenarios = [];
+      if (!playbookData.macro_clock) playbookData.macro_clock = [];
+      if (!playbookData.metadata) {
+        playbookData.metadata = { author: "Unknown", report_title: originalFilename, target_horizon: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" }), horizon_type: "Daily" };
+      }
+      if (!playbookData.thesis || typeof playbookData.thesis === "string") {
+        const thesisText = typeof playbookData.thesis === "string" ? playbookData.thesis : "";
+        playbookData.thesis = { bias: playbookData.bias || "Open", summary: thesisText };
+      }
 
-      const playbook = await storage.createPlaybook({
-        userId,
-        tickerId,
-        date: new Date().toISOString().split("T")[0],
-        playbookData,
-      });
+      const meta = playbookData.metadata;
+      const author = meta.author || "Unknown";
+      const horizonType = meta.horizon_type || "Daily";
+      const today = new Date().toISOString().split("T")[0];
+      const targetDateStart = parseTargetDate(meta.target_horizon) || today;
+      const targetDateEnd = horizonType === "Weekly" ? getEndOfWeek(targetDateStart) : targetDateStart;
+
+      const existingPlaybook = await storage.getPlaybookByTargetDate(tickerId, userId, targetDateStart);
+      let playbook;
+      let isUpdate = false;
+
+      if (existingPlaybook) {
+        isUpdate = true;
+        const existingData = existingPlaybook.playbookData as any;
+        const tacticalUpdates = Array.isArray(existingData.tactical_updates) ? existingData.tactical_updates : [];
+        tacticalUpdates.push({
+          timestamp: new Date().toISOString(),
+          source: originalFilename,
+          author: author,
+          addedLevels: playbookData.levels || [],
+          addedScenarios: playbookData.scenarios || [],
+          note: userMessage || `Updated from ${originalFilename}`,
+        });
+
+        const mergedLevels = [...(existingData.levels || [])];
+        for (const newLevel of (playbookData.levels || [])) {
+          const duplicate = mergedLevels.find((l: any) => l.price === newLevel.price && l.zone === newLevel.zone);
+          if (duplicate) {
+            duplicate.context = `${duplicate.context} | HIGH CONFIDENCE — confirmed by ${author}`;
+            if (!duplicate.source.includes(author)) duplicate.source = `${duplicate.source} + ${author}`;
+          } else {
+            mergedLevels.push(newLevel);
+          }
+        }
+
+        const mergedScenarios = [...(existingData.scenarios || [])];
+        for (const newScen of (playbookData.scenarios || [])) {
+          const dup = mergedScenarios.find((s: any) => s.if === newScen.if);
+          if (!dup) mergedScenarios.push(newScen);
+        }
+
+        const mergedGreen = [...(existingData.structural_zones?.bullish_green || [])];
+        const mergedYellow = [...(existingData.structural_zones?.neutral_yellow || [])];
+        const mergedRed = [...(existingData.structural_zones?.bearish_red || [])];
+        for (const l of (playbookData.structural_zones?.bullish_green || [])) {
+          if (!mergedGreen.find((e: any) => e.price === l.price)) mergedGreen.push(l);
+        }
+        for (const l of (playbookData.structural_zones?.neutral_yellow || [])) {
+          if (!mergedYellow.find((e: any) => e.price === l.price)) mergedYellow.push(l);
+        }
+        for (const l of (playbookData.structural_zones?.bearish_red || [])) {
+          if (!mergedRed.find((e: any) => e.price === l.price)) mergedRed.push(l);
+        }
+
+        const mergedIfThen = [...(existingData.if_then_scenarios || [])];
+        for (const s of (playbookData.if_then_scenarios || [])) {
+          if (!mergedIfThen.find((e: any) => e.condition === s.condition)) mergedIfThen.push(s);
+        }
+
+        const mergedEvents = [...(existingData.key_events || [])];
+        for (const e of (playbookData.key_events || [])) {
+          if (!mergedEvents.find((ex: any) => ex.title === e.title)) mergedEvents.push(e);
+        }
+
+        const mergedData = {
+          ...existingData,
+          levels: mergedLevels,
+          scenarios: mergedScenarios,
+          structural_zones: { bullish_green: mergedGreen, neutral_yellow: mergedYellow, bearish_red: mergedRed },
+          if_then_scenarios: mergedIfThen,
+          key_events: mergedEvents,
+          macro_clock: [...(existingData.macro_clock || []), ...(playbookData.macro_clock || []).filter((mc: any) => !(existingData.macro_clock || []).find((e: any) => e.event === mc.event))],
+          risk_factors: Array.from(new Set([...(existingData.risk_factors || []), ...(playbookData.risk_factors || [])])),
+          execution_checklist: Array.from(new Set([...(existingData.execution_checklist || []), ...(playbookData.execution_checklist || [])])),
+          tactical_updates: tacticalUpdates,
+          metadata: {
+            ...existingData.metadata,
+            author: existingData.metadata?.author?.includes(author) ? existingData.metadata.author : `${existingData.metadata?.author || "Unknown"} + ${author}`,
+          },
+        };
+
+        playbook = await storage.updatePlaybook(existingPlaybook.id, userId, { playbookData: mergedData });
+      } else {
+        playbookData.tactical_updates = [];
+        playbook = await storage.createPlaybook({
+          userId,
+          tickerId,
+          date: today,
+          author,
+          horizonType,
+          targetDateStart,
+          targetDateEnd,
+          playbookData,
+        });
+      }
 
       await storage.createChatMessage({
         userId,
         tickerId,
         role: "user",
-        content: `[Playbook Generated] Uploaded: ${originalFilename}${userMessage ? ` — "${userMessage}"` : ""}`,
+        content: `[Playbook ${isUpdate ? "Updated" : "Generated"}] Uploaded: ${originalFilename}${userMessage ? ` — "${userMessage}"` : ""}`,
       });
 
+      const thesisSummary = typeof playbookData.thesis === "object" ? playbookData.thesis.summary : playbookData.thesis;
       await storage.createChatMessage({
         userId,
         tickerId,
         role: "assistant",
-        content: `📊 **Trading Playbook Generated**\n\n**Macro Theme:** ${playbookData.macro_theme || "N/A"}\n**Bias:** ${playbookData.bias || "Open"}\n\n${playbookData.thesis || "See playbook for details."}\n\n_View the full interactive playbook in the dashboard above._`,
+        content: `**Trading Playbook ${isUpdate ? "Updated" : "Generated"}** (${author})\n\n**Horizon:** ${meta.target_horizon || "Today"} (${horizonType})\n**Macro Theme:** ${playbookData.macro_theme || "N/A"}\n**Bias:** ${playbookData.bias || playbookData.thesis?.bias || "Open"}\n\n${thesisSummary || "See playbook for details."}\n\n_${isUpdate ? "New insights merged into existing playbook." : "View the full interactive playbook in the dashboard above."}_`,
       });
 
-      res.status(201).json(playbook);
+      res.status(isUpdate ? 200 : 201).json(playbook);
     } catch (err: any) {
       console.error("Analyze document error:", err);
       res.status(500).json({ message: err.message || "Failed to analyze document" });

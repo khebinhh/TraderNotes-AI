@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchChatByTicker, sendChatMessage, analyzeDocument, fetchPlaybooks, updatePlaybookReview,
-  fetchJournalEntries, createJournalEntry, deleteJournalEntry,
+  fetchJournalEntries, createJournalEntry, deleteJournalEntry, pinMessageToPlaybook,
   type FullNote, type ChatMsg, type TickerData, type NoteData, type Playbook, type JournalEntry, type TacticalBriefing as TacticalBriefingData
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -151,6 +151,15 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/tickers", activeTicker?.id, "journal"] });
       toast({ title: "Removed from Journal" });
+    },
+  });
+
+  const pinToPlaybookMutation = useMutation({
+    mutationFn: ({ playbookId, messageId }: { playbookId: number; messageId: number }) =>
+      pinMessageToPlaybook(playbookId, messageId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/tickers", activeTicker?.id, "playbooks"] });
+      toast({ title: "Pinned to Playbook", description: "Chat message pinned to your active playbook" });
     },
   });
 
@@ -352,38 +361,70 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
               {new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
             </div>
             {isAssistant && (
-              (() => {
-                const isPinned = journalEntries.some(j => j.sourceMessageId === msg.id);
-                const pinnedEntry = journalEntries.find(j => j.sourceMessageId === msg.id);
-                return (
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <button
-                          onClick={() => {
-                            if (isPinned && pinnedEntry) {
-                              unpinMutation.mutate(pinnedEntry.id);
-                            } else {
-                              pinMutation.mutate({ content: msg.content, sourceMessageId: msg.id });
-                            }
-                          }}
-                          className={cn(
-                            "flex items-center gap-1 text-[10px] font-mono transition-all px-1.5 py-0.5 rounded",
-                            isPinned
-                              ? "text-amber-400 bg-amber-500/10"
-                              : "text-muted-foreground/40 hover:text-amber-400 hover:bg-amber-500/10"
-                          )}
-                          data-testid={`button-pin-${msg.id}`}
-                        >
-                          <Pin className="h-3 w-3" />
-                          {isPinned ? "Pinned" : "Pin"}
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent>{isPinned ? "Remove from Learning Journal" : "Pin to Learning Journal"}</TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                );
-              })()
+              <div className="flex items-center gap-1.5">
+                {playbooksList.length > 0 && (() => {
+                  const targetPb = playbooksList[0];
+                  const pbData = targetPb?.playbookData as any;
+                  const isPbPinned = Array.isArray(pbData?.tactical_updates) && pbData.tactical_updates.some((u: any) => u.pinnedMessageId === msg.id);
+                  return (
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            onClick={() => {
+                              if (!isPbPinned && targetPb) pinToPlaybookMutation.mutate({ playbookId: targetPb.id, messageId: msg.id });
+                            }}
+                            className={cn(
+                              "flex items-center gap-1 text-[10px] font-mono transition-all px-1.5 py-0.5 rounded",
+                              isPbPinned
+                                ? "text-blue-400 bg-blue-500/10"
+                                : "text-muted-foreground/40 hover:text-blue-400 hover:bg-blue-500/10"
+                            )}
+                            disabled={isPbPinned}
+                            data-testid={`button-pin-playbook-${msg.id}`}
+                          >
+                            <BookOpen className="h-3 w-3" />
+                            {isPbPinned ? "In Playbook" : "Playbook"}
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>{isPbPinned ? "Already pinned to playbook" : `Pin to ${targetPb?.title || "playbook"}`}</TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  );
+                })()}
+                {(() => {
+                  const isPinned = journalEntries.some(j => j.sourceMessageId === msg.id);
+                  const pinnedEntry = journalEntries.find(j => j.sourceMessageId === msg.id);
+                  return (
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            onClick={() => {
+                              if (isPinned && pinnedEntry) {
+                                unpinMutation.mutate(pinnedEntry.id);
+                              } else {
+                                pinMutation.mutate({ content: msg.content, sourceMessageId: msg.id });
+                              }
+                            }}
+                            className={cn(
+                              "flex items-center gap-1 text-[10px] font-mono transition-all px-1.5 py-0.5 rounded",
+                              isPinned
+                                ? "text-amber-400 bg-amber-500/10"
+                                : "text-muted-foreground/40 hover:text-amber-400 hover:bg-amber-500/10"
+                            )}
+                            data-testid={`button-pin-${msg.id}`}
+                          >
+                            <Pin className="h-3 w-3" />
+                            {isPinned ? "Pinned" : "Pin"}
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>{isPinned ? "Remove from Learning Journal" : "Pin to Learning Journal"}</TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  );
+                })()}
+              </div>
             )}
           </div>
         )}
@@ -410,42 +451,79 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
 
         <ScrollArea className="flex-1">
           <div className="p-2 space-y-1">
-            {playbooksList.length > 0 && (
-              <div className="mb-2">
-                <div className="px-2 py-1.5 text-[10px] font-mono text-primary uppercase tracking-wider flex items-center gap-1.5">
-                  <BookOpen className="h-3 w-3" />
-                  Playbooks
-                </div>
-                {playbooksList.map((pb) => {
-                  const pbData = pb.playbookData as any;
-                  return (
-                    <button
-                      key={pb.id}
-                      onClick={() => setActivePlaybookId(activePlaybookId === pb.id ? null : pb.id)}
-                      data-testid={`button-playbook-${pb.id}`}
-                      className={cn(
-                        "w-full text-left px-3 py-2 rounded-lg text-sm transition-all group",
-                        activePlaybookId === pb.id
-                          ? "bg-primary/10 border border-primary/20 text-foreground"
-                          : "hover:bg-muted/50 text-muted-foreground hover:text-foreground"
-                      )}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-medium truncate text-xs">
-                          {pbData.bias || "Open"} — {pbData.macro_theme || "Analysis"}
-                        </span>
-                        {activePlaybookId === pb.id && (
-                          <ChevronRight className="h-3 w-3 text-primary shrink-0" />
+            {playbooksList.length > 0 && (() => {
+              const weeklyPlaybooks = playbooksList.filter(p => (p.horizonType || (p.playbookData as any)?.metadata?.horizon_type) === "Weekly");
+              const dailyPlaybooks = playbooksList.filter(p => (p.horizonType || (p.playbookData as any)?.metadata?.horizon_type) !== "Weekly");
+              const authorBadge = (author: string | null | undefined) => {
+                if (!author) return null;
+                const isIzzy = author.toLowerCase().includes("izzy");
+                const isPharmD = author.toLowerCase().includes("pharmd");
+                if (isIzzy && isPharmD) return <span className="inline-flex items-center gap-0.5 text-[8px] font-mono"><span className="w-1.5 h-1.5 rounded-full bg-violet-400 inline-block" /><span className="w-1.5 h-1.5 rounded-full bg-cyan-400 inline-block" /></span>;
+                if (isIzzy) return <span className="inline-flex items-center gap-0.5 text-[8px] font-mono text-violet-400"><span className="w-1.5 h-1.5 rounded-full bg-violet-400 inline-block" />Izzy</span>;
+                if (isPharmD) return <span className="inline-flex items-center gap-0.5 text-[8px] font-mono text-cyan-400"><span className="w-1.5 h-1.5 rounded-full bg-cyan-400 inline-block" />PharmD</span>;
+                return <span className="text-[8px] font-mono text-muted-foreground">{author}</span>;
+              };
+              const renderPlaybookItem = (pb: Playbook) => {
+                const pbData = pb.playbookData as any;
+                const meta = pbData.metadata;
+                const horizon = pb.targetDateStart || meta?.target_horizon || format(new Date(pb.createdAt), "MMM d");
+                const author = pb.author || meta?.author;
+                const updateCount = Array.isArray(pbData.tactical_updates) ? pbData.tactical_updates.length : 0;
+                return (
+                  <button
+                    key={pb.id}
+                    onClick={() => setActivePlaybookId(activePlaybookId === pb.id ? null : pb.id)}
+                    data-testid={`button-playbook-${pb.id}`}
+                    className={cn(
+                      "w-full text-left px-3 py-2 rounded-lg text-sm transition-all group",
+                      activePlaybookId === pb.id
+                        ? "bg-primary/10 border border-primary/20 text-foreground"
+                        : "hover:bg-muted/50 text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="font-medium truncate text-xs">
+                        {horizon} — {pbData.bias || pbData.thesis?.bias || "Open"}
+                      </span>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {updateCount > 0 && (
+                          <span className="text-[8px] font-mono text-amber-400 bg-amber-500/10 px-1 rounded">+{updateCount}</span>
                         )}
+                        {activePlaybookId === pb.id && <ChevronRight className="h-3 w-3 text-primary" />}
                       </div>
-                      <p className="text-[10px] text-muted-foreground mt-0.5">
-                        {format(new Date(pb.createdAt), "MMM d, h:mm a")}
-                      </p>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+                    </div>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      {authorBadge(author)}
+                      <span className="text-[10px] text-muted-foreground">
+                        {pbData.macro_theme || meta?.report_title || "Analysis"}
+                      </span>
+                    </div>
+                  </button>
+                );
+              };
+              return (
+                <>
+                  {weeklyPlaybooks.length > 0 && (
+                    <div className="mb-2">
+                      <div className="px-2 py-1.5 text-[10px] font-mono text-blue-400 uppercase tracking-wider flex items-center gap-1.5">
+                        <Calendar className="h-3 w-3" />
+                        Weekly Blueprints
+                      </div>
+                      {weeklyPlaybooks.map(renderPlaybookItem)}
+                    </div>
+                  )}
+                  {dailyPlaybooks.length > 0 && (
+                    <div className="mb-2">
+                      <div className="px-2 py-1.5 text-[10px] font-mono text-primary uppercase tracking-wider flex items-center gap-1.5">
+                        <BookOpen className="h-3 w-3" />
+                        {weeklyPlaybooks.length > 0 ? "Daily Tactics" : "Playbooks"}
+                      </div>
+                      {dailyPlaybooks.map(renderPlaybookItem)}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
 
             {journalEntries.length > 0 && (
               <div className="mb-2">

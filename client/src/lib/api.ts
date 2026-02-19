@@ -215,12 +215,34 @@ export interface PlaybookZoneLevel {
   source: string;
 }
 
+export interface PlaybookEnhancedLevel {
+  price: number;
+  price_high?: number | null;
+  type: string;
+  zone: "green" | "yellow" | "red";
+  label: string;
+  provenance: string;
+  context: string;
+  source: string;
+  conviction: string;
+}
+
 export interface PlaybookScenario {
   id: string;
   condition: string;
   outcome: string;
   zone: "green" | "yellow" | "red";
   source: string;
+}
+
+export interface PlaybookEnhancedScenario {
+  id: string;
+  if: string;
+  then: string;
+  zone: "green" | "yellow" | "red";
+  rating: string;
+  source: string;
+  cross_market_filter: string | null;
 }
 
 export interface PlaybookEvent {
@@ -230,10 +252,32 @@ export interface PlaybookEvent {
   expected_behavior: string;
 }
 
+export interface PlaybookMacroClock {
+  event: string;
+  time: string;
+  risk: "High" | "Medium" | "Low";
+}
+
+export interface PlaybookMetadata {
+  author: string;
+  report_title: string;
+  target_horizon: string;
+  horizon_type: "Daily" | "Weekly" | "Monthly";
+}
+
+export interface TacticalUpdate {
+  timestamp: string;
+  source: string;
+  author: string;
+  addedLevels: PlaybookEnhancedLevel[];
+  addedScenarios: PlaybookEnhancedScenario[];
+  note: string;
+}
+
 export interface PlaybookData {
   macro_theme: string;
   bias: "Bullish" | "Bearish" | "Neutral" | "Open";
-  thesis: string;
+  thesis: string | { bias: string; summary: string };
   structural_zones: {
     bullish_green: PlaybookZoneLevel[];
     neutral_yellow: PlaybookZoneLevel[];
@@ -243,6 +287,11 @@ export interface PlaybookData {
   key_events: PlaybookEvent[];
   risk_factors: string[];
   execution_checklist: string[];
+  metadata?: PlaybookMetadata;
+  macro_clock?: PlaybookMacroClock[];
+  levels?: PlaybookEnhancedLevel[];
+  scenarios?: PlaybookEnhancedScenario[];
+  tactical_updates?: TacticalUpdate[];
 }
 
 export interface Playbook {
@@ -250,6 +299,10 @@ export interface Playbook {
   userId: string | null;
   tickerId: number | null;
   date: string;
+  author: string | null;
+  horizonType: string | null;
+  targetDateStart: string | null;
+  targetDateEnd: string | null;
   playbookData: PlaybookData;
   userReview: string | null;
   createdAt: string;
@@ -280,6 +333,11 @@ export async function fetchPlaybooks(tickerId: number): Promise<Playbook[]> {
 
 export async function updatePlaybookReview(id: number, review: string): Promise<Playbook> {
   const res = await apiRequest("PATCH", `/api/playbooks/${id}/review`, { review });
+  return res.json();
+}
+
+export async function pinMessageToPlaybook(playbookId: number, messageId: number): Promise<Playbook> {
+  const res = await apiRequest("POST", `/api/playbooks/${playbookId}/pin-message`, { messageId });
   return res.json();
 }
 

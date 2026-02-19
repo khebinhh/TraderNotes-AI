@@ -53,7 +53,9 @@ export interface IStorage {
   getPlaybooks(userId: string): Promise<Playbook[]>;
   getPlaybooksByTicker(tickerId: number, userId: string): Promise<Playbook[]>;
   getPlaybook(id: number, userId: string): Promise<Playbook | undefined>;
+  getPlaybookByTargetDate(tickerId: number, userId: string, targetDate: string): Promise<Playbook | undefined>;
   createPlaybook(playbook: InsertPlaybook): Promise<Playbook>;
+  updatePlaybook(id: number, userId: string, data: Partial<InsertPlaybook>): Promise<Playbook | undefined>;
   updatePlaybookReview(id: number, userId: string, review: string): Promise<Playbook | undefined>;
 
   getJournalEntries(tickerId: number, userId: string): Promise<JournalEntry[]>;
@@ -220,9 +222,24 @@ export class DatabaseStorage implements IStorage {
     return pb;
   }
 
+  async getPlaybookByTargetDate(tickerId: number, userId: string, targetDate: string): Promise<Playbook | undefined> {
+    const [pb] = await db.select().from(playbooks).where(
+      and(eq(playbooks.tickerId, tickerId), eq(playbooks.userId, userId), eq(playbooks.targetDateStart, targetDate))
+    );
+    return pb;
+  }
+
   async createPlaybook(playbook: InsertPlaybook): Promise<Playbook> {
     const [created] = await db.insert(playbooks).values(playbook).returning();
     return created;
+  }
+
+  async updatePlaybook(id: number, userId: string, data: Partial<InsertPlaybook>): Promise<Playbook | undefined> {
+    const [updated] = await db.update(playbooks)
+      .set(data)
+      .where(and(eq(playbooks.id, id), eq(playbooks.userId, userId)))
+      .returning();
+    return updated;
   }
 
   async updatePlaybookReview(id: number, userId: string, review: string): Promise<Playbook | undefined> {
