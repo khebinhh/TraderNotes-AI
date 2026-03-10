@@ -396,11 +396,9 @@ function CollapsibleSection({ title, icon, count, isOpen, onToggle, children, co
         </div>
         {isOpen ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
       </button>
-      {isOpen && (
-        <div className="px-4 pb-4">
-          {children}
-        </div>
-      )}
+      <div className={cn("px-4 pb-4", !isOpen && "hidden")}>
+        {children}
+      </div>
     </div>
   );
 }
@@ -738,11 +736,27 @@ export const PlaybookDashboard = memo(function PlaybookDashboard({ playbook, act
           </div>
         </CollapsibleSection>
 
-        {scenarios.length > 0 && (() => {
-          const primaryScenarios = scenarios.filter(s => (s as PlaybookEnhancedScenario).plan_type === "primary" || (s as any).plan_type === "primary");
-          const contingencyScenarios = scenarios.filter(s => (s as PlaybookEnhancedScenario).plan_type === "contingency" || (s as any).plan_type === "contingency");
-          const untyped = scenarios.filter(s => !(s as PlaybookEnhancedScenario).plan_type && !(s as any).plan_type);
-          const hasBranching = primaryScenarios.length > 0 || contingencyScenarios.length > 0;
+        {(() => {
+          const counterTrendPattern = /laaf|lbaf|failed\s*reclaim|counter.?trend|trap|false\s*break|fake.?out|stop\s*hunt/i;
+          const isCounterTrend = (s: any) => {
+            if (s.plan_type === "counter_trend") return true;
+            const ifText = s.if || s.condition || "";
+            const thenText = s.then || s.outcome || "";
+            return counterTrendPattern.test(ifText) || counterTrendPattern.test(thenText);
+          };
+
+          const primaryScenarios = scenarios.filter(s => {
+            const pt = (s as any).plan_type;
+            return pt === "primary" && !isCounterTrend(s);
+          });
+          const counterTrendScenarios = scenarios.filter(s => isCounterTrend(s));
+          const contingencyScenarios = scenarios.filter(s => {
+            const pt = (s as any).plan_type;
+            return pt === "contingency" && !isCounterTrend(s);
+          });
+          const categorized = new Set([...primaryScenarios, ...counterTrendScenarios, ...contingencyScenarios]);
+          const remaining = scenarios.filter(s => !categorized.has(s));
+          const hasGrouping = primaryScenarios.length > 0 || counterTrendScenarios.length > 0 || contingencyScenarios.length > 0;
 
           return (
             <CollapsibleSection
@@ -754,34 +768,57 @@ export const PlaybookDashboard = memo(function PlaybookDashboard({ playbook, act
               testId="section-scenarios"
             >
               <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <Badge variant="outline" className="text-[9px]">
                     {checkedScenarios.size}/{scenarios.length} triggered
                   </Badge>
-                  {hasBranching && (
+                  {hasGrouping && (
                     <>
-                      <Badge variant="outline" className="text-[9px] border-emerald-500/30 text-emerald-400">
-                        {primaryScenarios.length} primary
-                      </Badge>
-                      <Badge variant="outline" className="text-[9px] border-amber-500/30 text-amber-400">
-                        {contingencyScenarios.length} contingency
-                      </Badge>
+                      {primaryScenarios.length > 0 && (
+                        <Badge variant="outline" className="text-[9px] border-emerald-500/30 text-emerald-400">
+                          {primaryScenarios.length} primary
+                        </Badge>
+                      )}
+                      {counterTrendScenarios.length > 0 && (
+                        <Badge variant="outline" className="text-[9px] border-rose-500/30 text-rose-400">
+                          {counterTrendScenarios.length} traps
+                        </Badge>
+                      )}
+                      {contingencyScenarios.length > 0 && (
+                        <Badge variant="outline" className="text-[9px] border-amber-500/30 text-amber-400">
+                          {contingencyScenarios.length} contingency
+                        </Badge>
+                      )}
                     </>
                   )}
                 </div>
               </div>
               <div className="space-y-4" data-testid="if-then-scenarios">
-                {hasBranching ? (
+                {hasGrouping ? (
                   <>
                     {primaryScenarios.length > 0 && (
                       <div>
                         <div className="flex items-center gap-2 mb-2 pb-1.5 border-b border-emerald-500/20">
                           <Target className="h-3.5 w-3.5 text-emerald-400" />
                           <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">Primary Plan</span>
-                          <span className="text-[9px] text-muted-foreground/50 font-mono">Most likely path</span>
+                          <span className="text-[9px] text-muted-foreground/50 font-mono">Author's most likely path</span>
                         </div>
                         <div className="space-y-2">
                           {primaryScenarios.map((s) => (
+                            <EnhancedScenarioRow key={s.id} scenario={s} checked={checkedScenarios.has(s.id)} onToggle={() => toggleScenario(s.id)} />
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {counterTrendScenarios.length > 0 && (
+                      <div>
+                        <div className="flex items-center gap-2 mb-2 pb-1.5 border-b border-rose-500/20">
+                          <AlertTriangle className="h-3.5 w-3.5 text-rose-400" />
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-rose-400">Counter-Trend / Traps</span>
+                          <span className="text-[9px] text-muted-foreground/50 font-mono">LAAF/LBAF setups</span>
+                        </div>
+                        <div className="space-y-2">
+                          {counterTrendScenarios.map((s) => (
                             <EnhancedScenarioRow key={s.id} scenario={s} checked={checkedScenarios.has(s.id)} onToggle={() => toggleScenario(s.id)} />
                           ))}
                         </div>
@@ -791,8 +828,8 @@ export const PlaybookDashboard = memo(function PlaybookDashboard({ playbook, act
                       <div>
                         <div className="flex items-center gap-2 mb-2 pb-1.5 border-b border-amber-500/20">
                           <Shield className="h-3.5 w-3.5 text-amber-400" />
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400">Contingency Plan</span>
-                          <span className="text-[9px] text-muted-foreground/50 font-mono">What-if fallbacks</span>
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400">Contingency Plans</span>
+                          <span className="text-[9px] text-muted-foreground/50 font-mono">Floor / yearly level breaks</span>
                         </div>
                         <div className="space-y-2">
                           {contingencyScenarios.map((s) => (
@@ -801,9 +838,9 @@ export const PlaybookDashboard = memo(function PlaybookDashboard({ playbook, act
                         </div>
                       </div>
                     )}
-                    {untyped.length > 0 && (
+                    {remaining.length > 0 && (
                       <div className="space-y-2">
-                        {untyped.map((s) => (
+                        {remaining.map((s) => (
                           <EnhancedScenarioRow key={s.id} scenario={s} checked={checkedScenarios.has(s.id)} onToggle={() => toggleScenario(s.id)} />
                         ))}
                       </div>

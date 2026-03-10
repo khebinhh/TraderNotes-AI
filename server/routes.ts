@@ -1230,11 +1230,13 @@ If the author uses cautionary language suggesting heightened volatility or uncer
 - **Synthesis Output**: Instead of two separate summaries, provide ONE **"Unified Narrative"** thesis that explains the conflict. Example: "Izzy is looking for range suppression, but PharmD warns that a failure of 6894 triggers a liquidation. The common theme is: Watch the 6894 center closely."
 - The thesis should read like a **battle briefing**, not two separate reports.
 
-### 3. Scenario Pruning (Quality over Quantity)
-- **Include all meaningful If/Then Scenarios from the source material.** There is no minimum or maximum count — generate as many or as few as the document warrants. Quality and relevance are the only filters.
-- **The "Author's Favorite" Filter**: Prioritize standalone scenario cards for setups the authors label with high conviction (e.g., "A+ Setup," "Primarily interested in," "Favorite setup," "Mandatory hold," "Monster trade"), but also include other well-defined scenarios.
-- **Combine Mechanical Moves**: Do NOT create a card for every single price jump. Group "Standard Rotations" (e.g., "if 6871 fails, target 6866") into a single "Expected Range" card or absorb them into the Zone levels. Use Scenario cards ONLY for **Trend Changes** or **Traps** (LAAF/LBAF).
-- **Avoid Price Ladders**: "If level X breaks, go to level Y" is NOT a scenario — that's just how numbers work. A REAL scenario includes BEHAVIOR: "If we lose 6871 with high volume, expect a fast liquidation toward the 6860 spike base."
+### 3. Exhaustive Scenario Extraction (100% Completeness Mandate)
+- **You are a Strictly Exhaustive Data Extractor.** When analyzing a trading report (like PharmD_KS or Ms. Izzy), you must extract EVERY specific 'If/Then' branch mentioned.
+- **Do not combine unique trades.** If the author mentions a 'Trading Higher' path and a 'Trading Lower' path with multiple sub-conditions (e.g., LAAF, LBAF, failed reclaim), each must be its own unique entry in the scenarios array.
+- **There is NO limit on the number of scenarios.** Accuracy and completeness are the priority. If a report contains 15 scenarios, output all 15.
+- **The "Author's Favorite" Filter**: Tag high-conviction setups (e.g., "A+ Setup," "Primarily interested in," "Favorite setup," "Mandatory hold," "Monster trade") with rating "A+" but still include ALL other well-defined scenarios.
+- **Counter-Trend / Trap Detection**: Any scenario involving LAAF, LBAF, failed reclaim, counter-trend, trap, false break, fakeout, or stop hunt must be tagged with plan_type "counter_trend".
+- **Every scenario must include BEHAVIOR** in the "then" field — not just a price target. "If level X breaks, go to level Y" is incomplete. A complete scenario includes: "If we lose 6871 with high volume, expect a fast liquidation toward the 6860 spike base."
 
 ### 4. Behavioral Context (The "How" of the Trade)
 - In the **"then"** field of every scenario, include the expected **market character** — not just a price target.
@@ -1335,7 +1337,7 @@ The TOP-LEVEL structure must be symbol-keyed. Each ticker symbol is a key contai
           "source": "PharmD_KS",
           "cross_market_filter": null,
           "timing_requirement": null,
-          "plan_type": "primary | contingency",
+          "plan_type": "primary | counter_trend | contingency",
           "is_confluence": false,
           "sources": ["PharmD_KS"],
           "author_initials": "P"
@@ -1810,7 +1812,9 @@ Do NOT conflate these two concepts. If a document mentions BOTH "30-34 point con
 
         const mergedScenarios = [...(existingData.scenarios || [])];
         for (const newScen of (playbookData.scenarios || [])) {
-          const dup = mergedScenarios.find((s: any) => s.if === newScen.if);
+          const dup = mergedScenarios.find((s: any) =>
+            s.if === newScen.if && s.then === newScen.then && s.plan_type === newScen.plan_type
+          );
           if (!dup) mergedScenarios.push(newScen);
         }
 
@@ -1829,7 +1833,10 @@ Do NOT conflate these two concepts. If a document mentions BOTH "30-34 point con
 
         const mergedIfThen = [...(existingData.if_then_scenarios || [])];
         for (const s of (playbookData.if_then_scenarios || [])) {
-          if (!mergedIfThen.find((e: any) => e.condition === s.condition)) mergedIfThen.push(s);
+          const dup = mergedIfThen.find((e: any) =>
+            e.condition === s.condition && e.outcome === s.outcome
+          );
+          if (!dup) mergedIfThen.push(s);
         }
 
         const mergedEvents = [...(existingData.key_events || [])];
