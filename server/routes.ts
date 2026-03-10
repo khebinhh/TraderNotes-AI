@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { isAuthenticated } from "./auth";
 import { getLiveRatio, isFuturesSymbol, getFuturesMapping } from "./priceService";
+import { getMarketDate } from "./market-date";
 import {
   insertNoteSchema,
   insertCalculatedLevelSchema,
@@ -384,25 +385,47 @@ export async function registerRoutes(
         }
       }
 
-      const tickerPlaybooks = await storage.getPlaybooksByTicker(tickerId, userId);
-      if (tickerPlaybooks.length > 0) {
-        const activePlaybook = tickerPlaybooks[0];
-        const pbData = activePlaybook.playbookData as any;
-        contextInfo += `\n## ACTIVE PLAYBOOK (${activePlaybook.date})\n`;
-        contextInfo += `Bias: ${pbData.bias || "Open"}\n`;
-        contextInfo += `Macro Theme: ${pbData.macro_theme || "N/A"}\n`;
-        if (pbData.thesis) contextInfo += `Thesis: ${pbData.thesis.slice(0, 500)}\n`;
-        if (pbData.structural_zones) {
-          const green = pbData.structural_zones.bullish_green || [];
-          const yellow = pbData.structural_zones.neutral_yellow || [];
-          const red = pbData.structural_zones.bearish_red || [];
-          if (green.length > 0) contextInfo += `GREEN Zone Levels: ${green.map((l: any) => `${l.price}${l.price_high ? `-${l.price_high}` : ""} (${l.label})`).join(", ")}\n`;
-          if (yellow.length > 0) contextInfo += `YELLOW Zone Levels: ${yellow.map((l: any) => `${l.price}${l.price_high ? `-${l.price_high}` : ""} (${l.label})`).join(", ")}\n`;
-          if (red.length > 0) contextInfo += `RED Zone Levels: ${red.map((l: any) => `${l.price}${l.price_high ? `-${l.price_high}` : ""} (${l.label})`).join(", ")}\n`;
+      const currentMarketDate = getMarketDate();
+      const contextStack = await storage.getPlaybookContextStack(tickerId, userId, currentMarketDate);
+
+      const formatPlaybookSummary = (pb: any, label: string, detail: "full" | "summary" | "macro") => {
+        const pbData = pb.playbookData as any;
+        let out = `\n## ${label} PLAYBOOK (${pb.date})\n`;
+        out += `Horizon: ${pb.horizonType || "Daily"}\n`;
+        out += `Bias: ${pbData.bias || "Open"}\n`;
+        out += `Macro Theme: ${pbData.macro_theme || "N/A"}\n`;
+        if (pbData.thesis) {
+          const thesisText = typeof pbData.thesis === "object" ? (pbData.thesis.summary || JSON.stringify(pbData.thesis)) : String(pbData.thesis);
+          out += `Thesis: ${thesisText.slice(0, detail === "full" ? 1000 : 500)}\n`;
         }
-        if (pbData.if_then_scenarios && pbData.if_then_scenarios.length > 0) {
-          contextInfo += `If/Then Scenarios:\n${pbData.if_then_scenarios.map((s: any) => `- ${s.condition} → ${s.outcome}`).join("\n")}\n`;
+        if (detail === "full" || detail === "summary") {
+          if (pbData.structural_zones) {
+            const green = pbData.structural_zones.bullish_green || [];
+            const yellow = pbData.structural_zones.neutral_yellow || [];
+            const red = pbData.structural_zones.bearish_red || [];
+            if (green.length > 0) out += `GREEN Zone Levels: ${green.map((l: any) => `${l.price}${l.price_high ? `-${l.price_high}` : ""} (${l.label})`).join(", ")}\n`;
+            if (yellow.length > 0) out += `YELLOW Zone Levels: ${yellow.map((l: any) => `${l.price}${l.price_high ? `-${l.price_high}` : ""} (${l.label})`).join(", ")}\n`;
+            if (red.length > 0) out += `RED Zone Levels: ${red.map((l: any) => `${l.price}${l.price_high ? `-${l.price_high}` : ""} (${l.label})`).join(", ")}\n`;
+          }
+          if (pbData.if_then_scenarios && pbData.if_then_scenarios.length > 0) {
+            out += `If/Then Scenarios:\n${pbData.if_then_scenarios.map((s: any) => `- ${s.condition} → ${s.outcome}`).join("\n")}\n`;
+          }
         }
+        return out;
+      };
+
+      contextInfo += `\nCurrent Market Date: ${currentMarketDate}\n`;
+      if (contextStack.daily) {
+        contextInfo += formatPlaybookSummary(contextStack.daily, "DAILY", "full");
+      }
+      if (contextStack.weekly) {
+        contextInfo += formatPlaybookSummary(contextStack.weekly, "WEEKLY", "summary");
+      }
+      if (contextStack.monthly) {
+        contextInfo += formatPlaybookSummary(contextStack.monthly, "MONTHLY", "macro");
+      }
+      if (!contextStack.daily && !contextStack.weekly && !contextStack.monthly) {
+        contextInfo += "\nNo active playbooks found for today.\n";
       }
 
       const chatHistory = await storage.getChatMessagesByTicker(tickerId, userId);
@@ -422,7 +445,17 @@ export async function registerRoutes(
       const hasFile = uploadedFiles.length > 0;
       const originalFilename = uploadedFiles.length > 0 ? uploadedFiles.map(f => f.originalname).join(", ") : undefined;
 
-      const systemInstruction = `You are a Trading Mentor AI — "Chief of Staff" — for the instrument ${ticker.symbol}. You follow a strict "High-Reasoning" process when analyzing documents and answering questions.
+      const systemInstruction = `You are a Trading Mentor AI — "Chief of Staff" — for the instrument ${ticker.symbol}. Today's market date is ${currentMarketDate} (New York time). You follow a strict "High-Reasoning" process when analyzing documents and answering questions.
+
+## CONTEXT STACK — PLAYBOOK HIERARCHY
+
+You are provided with a "Context Stack" of playbooks: [Daily], [Weekly], and [Monthly]. Use them according to these priority rules:
+
+- **Priority 1**: Always defer to the **Daily Playbook** for specific price levels and If/Then triggers during RTH (Regular Trading Hours). The Daily plan has the most granular, actionable data.
+- **Priority 2**: Use the **Weekly Playbook** to explain the "Big Picture" — e.g., if we are in a 4-day balance, what the weekly directional bias is, and where the week's key levels sit.
+- **Priority 3**: Use the **Monthly Playbook** for macro context only — overall market regime, key monthly pivots, and structural bias.
+- **Conflict Resolution**: If the Daily plan says "Neutral" but the Weekly says "Bullish," you MUST explain both perspectives to the user: "While the weekly blueprint remains bullish, today's daily plan is neutral due to high-range chop." Never silently pick one over the other.
+- **Date Awareness**: Only reference playbooks that apply to today (${currentMarketDate}). Do NOT use February data for a March trade, or last week's weekly plan if it has expired.
 
 ## ABSOLUTE RULE #1: DOCUMENT DATA OVERRIDES EVERYTHING
 
@@ -630,7 +663,7 @@ Only suggest tickers that are NOT "${ticker.symbol}" (the current workspace).`;
         systemInstruction,
         generationConfig: {
           temperature: 0.1,
-          maxOutputTokens: 8192,
+          maxOutputTokens: 16384,
         },
       });
 
@@ -714,33 +747,55 @@ Only suggest tickers that are NOT "${ticker.symbol}" (the current workspace).`;
       let rawAiContent: string = "";
       let extractedGamePlan: any = null;
       let tacticalBriefing: any = null;
-      try {
-        const chat = model.startChat({
-          history: geminiHistory,
-        });
-        const result = await chat.sendMessage(parts);
-        rawAiContent = result.response.text();
-        aiContent = rawAiContent;
+      let isFallback = false;
 
-        const briefingParsed = parseTacticalBriefing(aiContent);
-        if (briefingParsed) {
-          aiContent = briefingParsed.cleanContent;
-          if (briefingParsed.briefing) {
-            tacticalBriefing = briefingParsed.briefing;
-          }
-        }
+      const MAX_CHAT_RETRIES = 3;
+      let lastAiErr: any = null;
+      for (let attempt = 0; attempt < MAX_CHAT_RETRIES; attempt++) {
+        try {
+          const chat = model.startChat({
+            history: geminiHistory,
+          });
+          const result = await chat.sendMessage(parts);
+          rawAiContent = result.response.text();
+          aiContent = rawAiContent;
 
-        if (hasFile) {
-          if (tacticalBriefing?.gamePlan) {
-            extractedGamePlan = tacticalBriefing.gamePlan;
+          const briefingParsed = parseTacticalBriefing(aiContent);
+          if (briefingParsed) {
+            aiContent = briefingParsed.cleanContent;
+            if (briefingParsed.briefing) {
+              tacticalBriefing = briefingParsed.briefing;
+            }
           }
-          if (!extractedGamePlan) {
-            extractedGamePlan = parseGamePlanFromResponse(rawAiContent);
+
+          if (hasFile) {
+            if (tacticalBriefing?.gamePlan) {
+              extractedGamePlan = tacticalBriefing.gamePlan;
+            }
+            if (!extractedGamePlan) {
+              extractedGamePlan = parseGamePlanFromResponse(rawAiContent);
+            }
           }
+          lastAiErr = null;
+          break;
+        } catch (aiErr: any) {
+          lastAiErr = aiErr;
+          const status = aiErr?.status || aiErr?.httpStatusCode || aiErr?.code;
+          const isRetryable = status === 503 || status === 429 || String(aiErr?.message || "").includes("503") || String(aiErr?.message || "").includes("429") || String(aiErr?.message || "").includes("Service Unavailable") || String(aiErr?.message || "").includes("overloaded");
+          if (isRetryable && attempt < MAX_CHAT_RETRIES - 1) {
+            const delay = Math.pow(2, attempt) * 1000;
+            console.log(`Chat API error (${status || "unknown"}). Retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_CHAT_RETRIES})...`);
+            await new Promise(r => setTimeout(r, delay));
+            continue;
+          }
+          break;
         }
-      } catch (aiErr: any) {
-        console.error("Gemini API error:", aiErr);
+      }
+
+      if (lastAiErr) {
+        console.error("Gemini API error after retries:", lastAiErr);
         aiContent = buildFallbackResponse(ticker.symbol, content, latestNote, supportLevels, resistanceLevels, checklistItems);
+        isFallback = true;
       }
 
       const aiMessage = await storage.createChatMessage({
@@ -811,6 +866,7 @@ Only suggest tickers that are NOT "${ticker.symbol}" (the current workspace).`;
         userMessage,
         aiMessage,
         createdNoteId: createdNote?.id || null,
+        fallback: isFallback,
       });
     } catch (err: any) {
       console.error("Chat error:", err);
@@ -1060,14 +1116,56 @@ Only suggest tickers that are NOT "${ticker.symbol}" (the current workspace).`;
 
       const originalFilename = uploadedFiles.map(f => f.originalname).join(", ");
 
-      const playbookSystemPrompt = `You are a Trading Playbook Generator for ${ticker.symbol}. Your job is to read uploaded trading documents (PDFs, images, CSVs) from analysts and extract a STRUCTURED "Living Playbook" in strict JSON format.
+      await storage.createChatMessage({
+        userId,
+        tickerId,
+        role: "user",
+        content: `📎 ${userMessage || "Generate Trading Playbook"} [${uploadedFiles.length} file${uploadedFiles.length > 1 ? "s" : ""}: ${originalFilename}]`,
+      });
+
+      const playbookSystemPrompt = `You are a Trading Playbook Generator. Your job is to read uploaded trading documents (PDFs, images, CSVs) from analysts and extract a STRUCTURED "Living Playbook" in strict JSON format.
+
+## STRICT HORIZON CLASSIFICATION (CRITICAL — DO THIS FIRST)
+
+Before extracting ANY data, you MUST classify the document's horizon type. Your first internal reasoning step must be: "Type: [MONTHLY/WEEKLY/DAILY]"
+
+**Classification Rules:**
+- **MONTHLY**: Title contains "Monthly", "Month of", "February Overview", "March Outlook", or covers an entire calendar month. These are rare — only use this if the document explicitly covers a full month.
+- **WEEKLY**: Title contains "Week of", "Weekly", "Week", a date range like "Feb 17-21" or "Mar 8-14", or covers multiple trading days as a cohesive plan. Example: "Market Analysis for The Week of 3/8" → WEEKLY.
+- **DAILY**: Title contains a single date like "Market Analysis and Trades for 2/10", "Trades for 3/9", or covers ONE specific trading day. This is the DEFAULT if unclear. Multi-day titles like "2/16-2/17" that cover a weekend bridge are still DAILY (use the first trading day).
+
+**Set metadata.horizon_type to exactly "Daily", "Weekly", or "Monthly".** This determines which database silo the playbook is stored in. A Weekly report must NEVER overwrite a Daily report.
+
+## SYMBOL-AWARE EXTRACTION (CRITICAL)
+
+Documents often cover MULTIPLE instruments (e.g., ES, NQ, QQQ) in a single PDF. You MUST segregate ALL data by ticker symbol.
+
+**Rules:**
+1. Return a JSON object where the primary keys are Ticker Symbols (e.g., "ES", "NQ", "BTCUSD")
+2. If a level or scenario is explicitly for NQ, place it ONLY under the "NQ" key. Do NOT mix symbols.
+3. Each ticker gets its OWN complete playbook data (bias, levels, scenarios, thesis, etc.)
+4. Shared data (macro_clock, key_events, risk_factors) goes in a top-level "shared" object
+5. The requesting workspace ticker is "${ticker.symbol}" — always include this key even if the document is sparse for it
+
+**How to detect the ticker:**
+- ES levels are typically in the 4000-7000 range (S&P 500 futures)
+- NQ levels are typically in the 15000-25000+ range (Nasdaq futures)
+- Look for explicit headers like "ES: Trading Lower/Higher" or "NQ: Levels"
+- If a section says "Nasdaq" or "NQ" or has 5-digit prices in the 15000-25000 range, it belongs under "NQ"
+- If a section says "S&P" or "ES" or has 4-digit prices in the 4000-7000 range, it belongs under "ES"
 
 ## AUTHOR PROFILES — SPECIALIZED EXTRACTION LOGIC
 
 ### Ms. Izzy (Ratio Trading Style)
-- **Signature Concepts**: "Calculated Ratios" (68-70, 173, 256, 346), "Nesting Channels," "Measured Moves," "RTH Range Levels"
+- **Signature Concepts**: "Calculated Ratios" (68-70, 173, 256, 346), "Nesting Channels," "Measured Moves," "RTH Range Levels," "Control Ratios," "Point Buffers"
 - **How she thinks**: Numbers-based — she calculates precise targets from ratio math. Her levels are algorithmically derived.
 - **Extract**: Every ratio number, nesting channel boundary, and measured move target. Tag source as "Ms. Izzy"
+
+**IZZY-SPECIFIC PRECISION RULES (Critical for ratio-based reports):**
+1. **Differentiate Resistance from Bearishness**: Do NOT put upside targets (e.g., 7043, annual highs, calculated highs) in the 'Bearish Zone' just because they are overhead resistance. Upside targets and calculated highs are BULLISH milestones — categorize them as zone="green" with type="Upside Target" or "Calculated High". Reserve the Bearish/Red zone ONLY for downside breakdown levels and actual bearish targets.
+2. **Extract 'Mathematical Anchors'**: If the author mentions recurring "buffers," "control ratios," or "point calculations" (e.g., "32 point buffer," "30-34 point control ratio," "68-70 point range"), extract these into a top-level "strategy_rules" array. Each rule: { "label": "Control Ratio", "value": "30-34 points", "description": "Active math anchor — if price is 32 points above a level, it is extended" }.
+3. **Contextualize RTH vs ETH**: Izzy often references RTH (Regular Trading Hours) vs ETH (Extended Trading Hours) levels. In the level's provenance field, ALWAYS specify "RTH High," "RTH Low," "ETH High," or "ETH Low" when the author distinguishes them — these carry different weight.
+4. **Scenario Deadlines**: If a scenario or checklist item has a "Best if before [DATE]" or "no later than the 3rd" clause, extract this as a "timing_requirement" field on the scenario (e.g., "Best if before Feb 3rd"). Time-sensitive items are HIGH PRIORITY.
 
 ### PharmD_KS (Profile Trading Style)
 - **Signature Concepts**: "Profile Shapes" (P-shape/b-shape), "LAAF/LBAF" setups, "Initial Balance (IB)" breaks, "Spike Bases"
@@ -1099,13 +1197,70 @@ Extract these as cross_market_filter on the scenario.
 ### 5. If/Then Algorithmic Thinking
 Map out EXACTLY as conditional logic. Quote the author's exact words.
 
+### 5b. Scenario Branching (Plan Type)
+Every scenario MUST include a "plan_type" field:
+- **"primary"**: The author's MOST LIKELY expected outcome. The main thesis, the base-case scenario. If the author says "I think X happens," that is primary.
+- **"contingency"**: The "What If" fallback. Scenarios that begin with "if I'm wrong," "if we trade past an edge," "alternatively," or describe less likely outcomes are contingency.
+- When in doubt, if a scenario aligns with the overall bias/thesis, mark it "primary." If it contradicts the bias or is a hedge, mark it "contingency."
+
 ### 6. Macro Context & Clock
 Documents emphasize temporal market themes (OPEX, CPI, NFP, earnings). Extract as a macro_clock array with event, time, and risk level.
+
+### 6b. Sentiment Warning Detection
+If the author uses cautionary language suggesting heightened volatility or uncertainty — words/phrases like "fucky," "grueling," "choppy," "volatile," "messy," "treacherous," "be careful," "reduce size," "small size," "dangerous" — set metadata.sentiment_warning to "Volatility Warning". This gives the trader a psychological heads-up to trade smaller. If no such language is detected, omit or set to null.
 
 ### 7. Structural Zones (Three-Color System)
 - **GREEN (Bullish Zone)**: Longs trigger, breakout confirmations, buying opportunities.
 - **YELLOW (Neutral/Caution Zone)**: "Thinking Box" — chop zone, no-trade zone, wait-and-see.
 - **RED (Bearish Zone)**: Short triggers, breakdown levels, selling pressure zones.
+
+## SYNTHESIS & TACTICAL PRIORITIZATION MODULE
+
+**Role**: You are a Senior Trading Strategist / Head of Research.
+**Objective**: When analyzing multiple documents from different experts (e.g., Ms. Izzy and PharmD_KS), merge them into a single, high-conviction "Battle Map" that prioritizes quality over quantity. Do NOT create a "Price Ladder" — create a concise tactical plan.
+
+### 1. Confluence Detection (Merging Levels)
+- **Identify Clusters**: If two authors provide levels within 5 points of each other (for ES) or 20 points (for NQ), do NOT list them separately. Merge them into a single **"Confluence Zone"** with a price range (e.g., 6894-6902).
+- **Label by Weight**: In the merged level, list BOTH authors as sources. Set \`is_confluence: true\` on the level. Label it as a "High-Confluence Decision Zone" if both authors focus heavily on the area.
+- **Data Structure**: Confluence levels include: \`sources: ["PharmD_KS", "Ms. Izzy"]\` (array of all contributing authors) and \`is_confluence: true\` (boolean flag).
+- A trader would rather know about 3 high-confluence levels than 30 individual ones.
+
+### 2. Narrative Synthesis (The "One Thesis" Rule)
+- **Compare Biases**: If Author A is "Neutral" and Author B is "Bearish," identify the "Pivot" that changes the bias.
+- **Synthesis Output**: Instead of two separate summaries, provide ONE **"Unified Narrative"** thesis that explains the conflict. Example: "Izzy is looking for range suppression, but PharmD warns that a failure of 6894 triggers a liquidation. The common theme is: Watch the 6894 center closely."
+- The thesis should read like a **battle briefing**, not two separate reports.
+
+### 3. Scenario Pruning (Quality over Quantity)
+- **Include all meaningful If/Then Scenarios from the source material.** There is no minimum or maximum count — generate as many or as few as the document warrants. Quality and relevance are the only filters.
+- **The "Author's Favorite" Filter**: Prioritize standalone scenario cards for setups the authors label with high conviction (e.g., "A+ Setup," "Primarily interested in," "Favorite setup," "Mandatory hold," "Monster trade"), but also include other well-defined scenarios.
+- **Combine Mechanical Moves**: Do NOT create a card for every single price jump. Group "Standard Rotations" (e.g., "if 6871 fails, target 6866") into a single "Expected Range" card or absorb them into the Zone levels. Use Scenario cards ONLY for **Trend Changes** or **Traps** (LAAF/LBAF).
+- **Avoid Price Ladders**: "If level X breaks, go to level Y" is NOT a scenario — that's just how numbers work. A REAL scenario includes BEHAVIOR: "If we lose 6871 with high volume, expect a fast liquidation toward the 6860 spike base."
+
+### 4. Behavioral Context (The "How" of the Trade)
+- In the **"then"** field of every scenario, include the expected **market character** — not just a price target.
+- Look for keywords: "Volume building," "Squeeze," "Liquidated," "Spike," "Grind," "Rotational chop," "Fast move," "Sticky price action," "Fade."
+- **Bad**: "THEN target 6869"
+- **Good**: "THEN expect a fast liquidation toward the 6869 spike base"
+- **Good**: "THEN look for a slow grind higher toward the 6928 monthly pivot"
+
+### 5. Cross-Author Requirements
+- Explicitly check if one author's condition provides a filter for another author's trade.
+- Example: "PharmD's LBAF setup on ES is only high-probability if QQQ respects Izzy's 618.69 level."
+- Set \`cross_market_filter\` on the scenario when this is detected.
+
+### 6. Author Style Indicators
+- On each level and scenario, include an \`author_initials\` field:
+  - "I" for Ms. Izzy
+  - "P" for PharmD_KS
+  - "I+P" for confluence (both authors)
+  - First letter of author name for unknown authors
+- This allows the UI to show small color-coded dots indicating which logic contributed.
+
+### 7. The "Rule of 3" Output Priority
+The final "Synthesized Gameplan" should prioritize:
+1. **Confluence levels FIRST** — these are the highest-probability zones
+2. **Author's Favorite setups** — only high-conviction standalone scenarios
+3. **The Decision Zone** — the ONE price area where the session's direction gets decided
 
 ## TRADING JARGON DICTIONARY
 
@@ -1138,63 +1293,102 @@ When a chart image is uploaded:
 
 Return ONLY valid JSON. No markdown, no explanation, no preamble.
 
+The TOP-LEVEL structure must be symbol-keyed. Each ticker symbol is a key containing that instrument's complete playbook. Shared data goes in a "shared" key.
+
 {
   "metadata": {
     "author": "PharmD_KS | Ms. Izzy | Unknown | PharmD_KS + Ms. Izzy",
     "report_title": "Full title of document or description of chart",
     "target_horizon": "Date or Date Range (e.g., 'Feb 18', 'Feb 17-21')",
-    "horizon_type": "Daily | Weekly | Monthly"
+    "horizon_type": "Daily | Weekly | Monthly",
+    "sentiment_warning": "Volatility Warning | null",
+    "_horizon_reasoning": "Type: [MONTHLY/WEEKLY/DAILY] — one sentence explaining why"
   },
-  "thesis": { "bias": "Bullish | Bearish | Neutral | Open", "summary": "2-3 paragraph thesis with evidence and invalidation" },
-  "macro_clock": [
-    { "event": "VIX Expiration", "time": "Feb 18", "risk": "High" },
-    { "event": "OPEX", "time": "Feb 21", "risk": "High" }
-  ],
-  "levels": [
-    {
-      "price": 6898,
-      "price_high": null,
-      "type": "Resistance | Support | Pivot | Snap Zone | Spike Base | IB High | IB Low | POC | VAH | VAL",
-      "zone": "green | yellow | red",
-      "label": "Short description of role",
-      "provenance": "Thursday Spike Base",
-      "context": "Exact quote or paraphrase from document",
-      "source": "PharmD_KS",
-      "conviction": "A+ | A | B | C"
+  "instruments": {
+    "ES": {
+      "bias": "Bearish",
+      "thesis": { "bias": "Bearish", "summary": "Thesis for ES with evidence" },
+      "macro_theme": "ES dominant theme",
+      "levels": [
+        {
+          "price": 6898,
+          "price_high": 6902,
+          "type": "Resistance | Support | Pivot | Snap Zone | Spike Base | IB High | IB Low | POC | VAH | VAL | Confluence Zone",
+          "zone": "green | yellow | red",
+          "label": "Short description (or 'High-Confluence Decision Zone' for merged levels)",
+          "provenance": "Thursday Spike Base",
+          "context": "Paraphrase from document",
+          "source": "PharmD_KS (or 'PharmD_KS + Ms. Izzy' for confluence)",
+          "conviction": "A+ | A | B | C",
+          "is_confluence": false,
+          "sources": ["PharmD_KS"],
+          "author_initials": "P"
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "es_scenario_1",
+          "if": "IF price sees a LBAF at 6828",
+          "then": "THEN expect a fast liquidation toward the 6860 spike base (include behavioral context, not just price target)",
+          "zone": "green | yellow | red",
+          "rating": "A+ | A | B | C",
+          "source": "PharmD_KS",
+          "cross_market_filter": null,
+          "timing_requirement": null,
+          "plan_type": "primary | contingency",
+          "is_confluence": false,
+          "sources": ["PharmD_KS"],
+          "author_initials": "P"
+        }
+      ],
+      "strategy_rules": [
+        {
+          "label": "Control Ratio",
+          "value": "30-34 points",
+          "description": "Active math anchor — if price is X points above a level, it is considered extended"
+        }
+      ],
+      "execution_checklist": ["ES-specific actionable items"]
+    },
+    "NQ": {
+      "bias": "Neutral",
+      "thesis": { "bias": "Neutral", "summary": "Thesis for NQ with evidence" },
+      "macro_theme": "NQ dominant theme",
+      "levels": [ ... ],
+      "scenarios": [ ... ],
+      "execution_checklist": ["NQ-specific actionable items"]
     }
-  ],
-  "scenarios": [
-    {
-      "id": "scenario_1",
-      "if": "IF price sees a LBAF at 6828",
-      "then": "THEN valid long targeting 6869",
-      "zone": "green | yellow | red",
-      "rating": "A+ | A | B | C",
-      "source": "PharmD_KS",
-      "cross_market_filter": null
-    }
-  ],
-  "key_events": [
-    {
-      "title": "Event name",
-      "time": "Date/time string",
-      "impact": "high | medium | low",
-      "expected_behavior": "How this event affects trading"
-    }
-  ],
-  "risk_factors": ["Key risk factor 1"],
-  "execution_checklist": ["Specific actionable item with exact price levels"],
-  "macro_theme": "Dominant market theme string"
+  },
+  "shared": {
+    "macro_clock": [
+      { "event": "VIX Expiration", "time": "Feb 18", "risk": "High" }
+    ],
+    "key_events": [
+      { "title": "Event name", "time": "Date/time string", "impact": "high | medium | low", "expected_behavior": "How this affects trading" }
+    ],
+    "risk_factors": ["Key risk factor 1"]
+  }
 }
 
+**IMPORTANT:** If the document only covers ONE instrument, still use the instruments structure with just that one key. The requesting ticker is "${ticker.symbol}" — normalize symbol names: use "ES" for ES1!/ES/S&P, "NQ" for NQ1!/NQ/Nasdaq, "BTC" for BTCUSD, etc.
+
 ## BACKWARD COMPATIBILITY
-Also include these legacy fields for backward compatibility:
-- "bias": same as thesis.bias
+Also include these legacy FLAT fields at the root level (alongside "instruments") for backward compatibility. Use data from the PRIMARY instrument (${ticker.symbol}):
+- "bias": same as the primary instrument's bias
+- "thesis": same as the primary instrument's thesis
+- "macro_theme": same as the primary instrument's macro_theme
+- "levels": COMBINED levels from ALL instruments (for legacy display)
+- "scenarios": COMBINED scenarios from ALL instruments
 - "structural_zones": { "bullish_green": [...], "neutral_yellow": [...], "bearish_red": [...] }
   - Map from the levels array: green zone levels → bullish_green, yellow → neutral_yellow, red → bearish_red
   - Each entry: { "price", "price_high", "label", "context", "source" }
 - "if_then_scenarios": mapped from scenarios array
-  - Each entry: { "id", "condition": scenarios[].if, "outcome": scenarios[].then, "zone", "source" }
+  - Each entry: { "id", "condition": scenarios[].if, "outcome": scenarios[].then, "zone", "source", "timing_requirement", "is_confluence", "sources", "author_initials" }
+- "strategy_rules": COMBINED from all instruments (mathematical anchors, control ratios, buffers)
+- "key_events": same as shared.key_events
+- "risk_factors": same as shared.risk_factors
+- "execution_checklist": COMBINED from all instruments
+- "macro_clock": same as shared.macro_clock
 
 ## MULTI-FILE SYNTHESIS
 
@@ -1206,20 +1400,79 @@ When multiple files are uploaded:
 5. **Unified Scenarios**: Merge and deduplicate.
 6. **Author Detection**: If multiple authors detected, set metadata.author to combined (e.g., "PharmD_KS + Ms. Izzy").
 
+## OUTPUT SIZE OPTIMIZATION
+- Keep "context" strings under 80 characters — paraphrase, don't quote entire paragraphs
+- Keep "label" strings under 40 characters
+- Keep thesis.summary under 500 characters
+- Do NOT duplicate data across levels, scenarios, and structural_zones — reference by price only in structural_zones
+- Omit null fields entirely (e.g., if price_high is null, leave it out)
+- Omit cross_market_filter if null
+- For large documents covering multiple instruments, focus levels on the PRIMARY ticker requested
+
+## TEMPORAL CONTEXT FILTER (Critical for Accuracy)
+
+Documents contain BOTH historical review AND forward-looking plans. You MUST distinguish them:
+
+**HISTORICAL sections (DO NOT use for Zones, Levels, or Scenarios):**
+- Sections labeled "Review," "Recap," "Prior Weeks," "Prior Week Conditions," "Last Week," "What Happened"
+- Any section describing what ALREADY occurred in the market
+- These are for CONTEXT ONLY — they explain WHY the author holds a certain bias, but the specific prices and events are PAST
+
+**FORWARD-LOOKING sections (USE these for Zones, Levels, and Scenarios):**
+- Sections labeled "Early Week Conditions," "Price for Tomorrow," "Plan," "Game Plan," "This Week," "Outlook," "Forecast," "Setup"
+- Any section describing what the author EXPECTS to happen or is watching for
+- The Playbook should ONLY populate Structural Zones, Levels, and If/Then Scenarios from these forward-looking sections
+
+**Date Validation Rule:** Determine the document's "Report Date" from the title, header, or publication date. Any specific dates mentioned in the document that occurred BEFORE the Report Date are HISTORICAL references — do NOT include them as actionable scenarios or targets. For example, if the Report Date is Jan 12 and the text says "retest 6920 as early as Jan 5th," that is a PAST event from the review section, not a future target. Only include dates that are on or after the Report Date, or dates explicitly labeled as "Upcoming" or "Next."
+
+## CANDLESTICK PATTERN DETECTION
+
+Scan the document for mentions of specific technical chart patterns. These include but are not limited to:
+- **Reversal Patterns**: Star Reversal, Evening Star, Morning Star, Doji Star, Hammer, Inverted Hammer, Engulfing Pattern, Harami
+- **Continuation/Structure Patterns**: Double Top, Double Bottom, Head & Shoulders, Inside Day, Inside Week, Outside Day
+- **Volume Patterns**: Spike Reversal, Exhaustion Gap, Island Reversal
+
+When ANY of these patterns are mentioned by the author, extract them as a PRIMARY "risk_factor" in the shared.risk_factors array. Format: "[Pattern Name] — [author's exact warning or context]". For example: "4-Day Star Reversal Pattern — author warns 'be very mindful of the potential star reversal pattern that could form.'"
+
+These pattern warnings OVERRIDE individual price levels in importance — if the pattern completes, the directional levels may become unreliable.
+
+## STRICT SOURCE ADHERENCE (Zero Hallucination Policy)
+
+**DO NOT include ANY geopolitical events, macro events, country names, political figures, or conflicts that are NOT explicitly written in the uploaded document.** If the document says "Geopolitical risk" without specifying details, your risk_factor must say exactly "Geopolitical risk" — do NOT elaborate with specific countries, invasions, tariffs, sanctions, or political events from your training data.
+
+Rules:
+1. If the document mentions a vague risk (e.g., "geopolitical risk," "trade tensions"), quote it EXACTLY as written — never expand or specify
+2. Never infer or add specific events (wars, elections, policy changes) that are not explicitly stated in the document
+3. If unsure whether something is explicitly in the document or from your own knowledge, OMIT it entirely
+4. Every risk_factor, key_event, and macro_clock entry MUST be directly traceable to specific text in the uploaded document
+
+## MATH LABELING PRECISION
+
+"Point Reductions" and "Control Ratios" are DIFFERENT mathematical concepts and MUST be kept as separate strategy_rules entries:
+
+- **Point Reductions**: A reduction in the TARGET price range (e.g., "8-13 point reductions" means the expected move target shrinks by 8-13 points). These describe how far price might travel.
+- **Control Ratios**: A fixed mathematical relationship used to measure distance from key levels (e.g., "30-34 point control ratio" means if price is 30-34 points above/below a level, it is considered at its mathematical boundary). These describe spatial relationships between levels.
+
+Do NOT conflate these two concepts. If a document mentions BOTH "30-34 point control ratios" and "8 point reductions," create TWO separate strategy_rules entries with distinct labels and descriptions. Mixing them could lead a trader to the wrong target.
+
 ## CRITICAL RULES
 1. Extract EVERY price level — text AND chart annotations across ALL files
 2. Use ONLY data from uploaded documents. NEVER use your own market knowledge.
 3. Quote the author's exact language wherever possible
 4. Every level MUST have provenance (the "why" / historical origin)
 5. The JSON must be parseable — no trailing commas, no comments
-6. Return ONLY the JSON object, nothing else`;
+6. Return ONLY the JSON object, nothing else
+7. COMPLETE the entire JSON — never stop mid-output. If the document is very large, prioritize the most important levels and scenarios rather than truncating
+8. NEVER populate Zones, Levels, or Scenarios from historical/review sections — only from forward-looking plan sections
+9. NEVER fabricate geopolitical events — only include what is explicitly written in the document
+10. Keep Point Reductions and Control Ratios as SEPARATE strategy_rules entries`;
 
       const model = genAI.getGenerativeModel({
-        model: "gemini-2.5-flash",
+        model: "gemini-2.5-pro",
         systemInstruction: playbookSystemPrompt,
         generationConfig: {
           temperature: 0.1,
-          maxOutputTokens: 16384,
+          maxOutputTokens: 65536,
           responseMimeType: "application/json",
         },
       });
@@ -1271,6 +1524,7 @@ When multiple files are uploaded:
         }
       }
       if (successCount === 0) {
+        await storage.createChatMessage({ userId, tickerId, role: "assistant", content: `⚠️ **File Processing Failed**\n\nCouldn't process the uploaded file(s): ${originalFilename}\n\nThe files may be corrupted or in an unsupported format.\n\n**Try:** Re-upload the file, convert PDFs to images, or ensure files are under 10MB.\n\n_Supported formats: PDF, PNG, JPG, CSV_` });
         return res.status(500).json({ message: "Failed to process all uploaded files. Please try different file formats (PDF, PNG, JPG, CSV)." });
       }
       for (const path of tempFilePaths) {
@@ -1279,38 +1533,238 @@ When multiple files are uploaded:
 
       parts.push({ text: userMessage || `Analyze this document and extract a complete trading playbook for ${ticker.symbol}. Return ONLY the JSON structure.` });
 
-      const result = await model.generateContent({ contents: [{ role: "user", parts }] });
-      const rawText = result.response.text();
+      const sanitizeAndParseJSON = (raw: string): any => {
+        let text = raw.trim();
+        text = text.replace(/```(?:json|JSON)?\s*\n?([\s\S]*?)\n?\s*```/g, "$1");
+        text = text.trim();
 
-      let playbookData: any;
-      try {
-        playbookData = JSON.parse(rawText);
-      } catch {
-        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          try {
-            playbookData = JSON.parse(jsonMatch[0].replace(/,\s*([}\]])/g, "$1"));
-          } catch {
-            return res.status(500).json({ message: "AI returned invalid JSON. Please try again." });
+        const tryParse = (s: string): any => {
+          s = s.replace(/,\s*([}\]])/g, "$1");
+          s = s.replace(/[\x00-\x1F\x7F]/g, (ch) => ch === '\n' || ch === '\r' || ch === '\t' ? ch : '');
+          return JSON.parse(s);
+        };
+
+        try { return tryParse(text); } catch {}
+
+        const firstBrace = text.indexOf("{");
+        const lastBrace = text.lastIndexOf("}");
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          const extracted = text.substring(firstBrace, lastBrace + 1);
+          try { return tryParse(extracted); } catch {}
+        }
+
+        const codeBlockMatch = text.match(/```[\s\S]*?```/);
+        if (codeBlockMatch) {
+          const inner = codeBlockMatch[0].replace(/```\w*\s*/, "").replace(/```$/, "").trim();
+          try { return tryParse(inner); } catch {}
+        }
+
+        return null;
+      };
+
+      const repairTruncatedJSON = (raw: string): any => {
+        let text = raw.trim();
+        text = text.replace(/```(?:json|JSON)?\s*\n?([\s\S]*?)\n?\s*```/g, "$1").trim();
+
+        const firstBrace = text.indexOf("{");
+        if (firstBrace === -1) return null;
+        text = text.substring(firstBrace);
+
+        text = text.replace(/,\s*([}\]])/g, "$1");
+        text = text.replace(/[\x00-\x1F\x7F]/g, (ch) => ch === '\n' || ch === '\r' || ch === '\t' ? ch : '');
+
+        let openBraces = 0, openBrackets = 0;
+        let inString = false, escape = false;
+        let lastValidEnd = -1;
+
+        for (let i = 0; i < text.length; i++) {
+          const ch = text[i];
+          if (escape) { escape = false; continue; }
+          if (ch === '\\' && inString) { escape = true; continue; }
+          if (ch === '"') { inString = !inString; continue; }
+          if (inString) continue;
+          if (ch === '{') openBraces++;
+          if (ch === '}') { openBraces--; if (openBraces === 0 && openBrackets === 0) { lastValidEnd = i; break; } }
+          if (ch === '[') openBrackets++;
+          if (ch === ']') openBrackets--;
+        }
+
+        if (lastValidEnd > 0) {
+          try { return JSON.parse(text.substring(0, lastValidEnd + 1)); } catch {}
+        }
+
+        let truncated = text;
+        if (inString) truncated += '"';
+        truncated = truncated.replace(/,\s*$/, '');
+        while (openBrackets > 0) { truncated += ']'; openBrackets--; }
+        while (openBraces > 0) { truncated += '}'; openBraces--; }
+        truncated = truncated.replace(/,\s*([}\]])/g, "$1");
+
+        try { return JSON.parse(truncated); } catch {}
+
+        const keyFields = ["metadata", "thesis", "levels", "scenarios"];
+        for (const field of keyFields.reverse()) {
+          const fieldIdx = truncated.lastIndexOf(`"${field}"`);
+          if (fieldIdx > 0) {
+            let candidate = truncated.substring(0, fieldIdx).replace(/,\s*$/, '');
+            let ob = 0, obk = 0;
+            for (const c of candidate) { if (c === '{') ob++; if (c === '}') ob--; if (c === '[') obk++; if (c === ']') obk--; }
+            while (obk > 0) { candidate += ']'; obk--; }
+            while (ob > 0) { candidate += '}'; ob--; }
+            try { return JSON.parse(candidate); } catch {}
           }
+        }
+
+        return null;
+      };
+
+      let rawText = "";
+      let playbookData: any = null;
+      const MAX_RETRIES = 3;
+
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          const result = await model.generateContent({ contents: [{ role: "user", parts }] });
+          const finishReason = result.response.candidates?.[0]?.finishReason;
+          rawText = result.response.text();
+          console.log(`---- RAW AI RESPONSE START (attempt ${attempt}, finishReason=${finishReason}) ----`);
+          console.log(rawText.slice(0, 500));
+          console.log(`---- RAW AI RESPONSE END (${rawText.length} chars) ----`);
+
+          if (finishReason === "MAX_TOKENS") {
+            console.warn(`Response truncated by token limit on attempt ${attempt}. Attempting repair...`);
+            playbookData = repairTruncatedJSON(rawText);
+            if (playbookData) {
+              console.log("Truncated response repaired successfully.");
+              break;
+            }
+          }
+
+          playbookData = sanitizeAndParseJSON(rawText);
+          if (playbookData) break;
+
+          if (finishReason === "STOP" && rawText.length > 1000) {
+            console.warn(`finishReason=STOP but JSON parse failed (${rawText.length} chars). Attempting truncated repair...`);
+            playbookData = repairTruncatedJSON(rawText);
+            if (playbookData) {
+              console.log("STOP-truncated response repaired successfully.");
+              break;
+            }
+          }
+
+          console.error(`JSON Parse Error Location: attempt ${attempt}, finishReason=${finishReason}, raw length=${rawText.length}, first 200 chars: ${rawText.slice(0, 200)}`);
+
+          if (attempt < MAX_RETRIES) {
+            const delay = Math.pow(2, attempt) * 1000;
+            console.log(`Retrying in ${delay}ms...`);
+            await new Promise(r => setTimeout(r, delay));
+          }
+        } catch (apiErr: any) {
+          const status = apiErr?.status || apiErr?.httpStatusCode;
+          console.error(`Gemini API error (attempt ${attempt}):`, apiErr?.message || apiErr);
+          if ((status === 429 || status === 503) && attempt < MAX_RETRIES) {
+            const delay = Math.pow(2, attempt) * 1000;
+            console.log(`Rate limited/overloaded (${status}). Retrying in ${delay}ms...`);
+            await new Promise(r => setTimeout(r, delay));
+            continue;
+          }
+          if (attempt >= MAX_RETRIES) {
+            await storage.createChatMessage({ userId, tickerId, role: "assistant", content: `⚠️ **AI Service Busy**\n\nThe AI service is currently experiencing high traffic and couldn't process "${originalFilename}". This is temporary.\n\n**Try:** Use the retry button below to resubmit, or wait a minute and upload again.` });
+            return res.status(503).json({ message: "AI service is currently busy. Please try again in a moment." });
+          }
+        }
+      }
+
+      if (!playbookData && rawText) {
+        console.warn("All standard JSON parse attempts failed. Attempting truncated JSON repair...");
+        playbookData = repairTruncatedJSON(rawText);
+        if (playbookData) {
+          console.log("Truncated JSON repair succeeded — partial playbook recovered.");
         } else {
-          return res.status(500).json({ message: "AI returned invalid JSON. Please try again." });
+          console.error("JSON repair also failed. Returning error to user.");
+          console.error("Last raw response (first 1000 chars):", rawText.slice(0, 1000));
+          console.error("Last raw response (last 500 chars):", rawText.slice(-500));
+          await storage.createChatMessage({ userId, tickerId, role: "assistant", content: `⚠️ **Playbook Generation Failed**\n\nThe AI couldn't generate a complete playbook for "${originalFilename}". The document may be too complex or contain too much data for a single analysis.\n\n**Try:**\n• Use the retry button to try again (AI responses can vary)\n• Upload just the ES or NQ section separately\n• Convert the PDF to images for better processing` });
+          return res.status(500).json({ 
+            message: `The AI couldn't generate a complete playbook for this document. The file "${originalFilename}" may be too complex or contain too much data for a single analysis. Try uploading just the ES or NQ section separately.`
+          });
         }
       }
 
       if (!playbookData || typeof playbookData !== "object") {
+        await storage.createChatMessage({ userId, tickerId, role: "assistant", content: `⚠️ **Invalid AI Response**\n\nThe AI returned an unexpected format for "${originalFilename}". This sometimes happens with unusual document layouts.\n\n**Try:** Use the retry button — results often improve on a second attempt.` });
         return res.status(500).json({ message: "AI returned invalid data structure. Please try again." });
       }
+
+      const normalizeSymbol = (sym: string): string => {
+        const s = sym.toUpperCase().replace(/[!]/g, "");
+        if (s === "ES1" || s === "ES" || s.includes("S&P")) return "ES";
+        if (s === "NQ1" || s === "NQ" || s.includes("NASDAQ")) return "NQ";
+        return s;
+      };
+      const primarySymbol = normalizeSymbol(ticker.symbol);
+
+      if (playbookData.instruments && typeof playbookData.instruments === "object") {
+        const normalizedInstruments: Record<string, any> = {};
+        for (const [key, val] of Object.entries(playbookData.instruments)) {
+          normalizedInstruments[normalizeSymbol(key)] = val;
+        }
+        playbookData.instruments = normalizedInstruments;
+
+        for (const [sym, instrData] of Object.entries(playbookData.instruments) as [string, any][]) {
+          if (!instrData.levels) instrData.levels = [];
+          if (!instrData.scenarios) instrData.scenarios = [];
+          if (!instrData.execution_checklist) instrData.execution_checklist = [];
+          if (!instrData.thesis || typeof instrData.thesis === "string") {
+            const t = typeof instrData.thesis === "string" ? instrData.thesis : "";
+            instrData.thesis = { bias: instrData.bias || "Open", summary: t };
+          }
+          if (!instrData.bias) instrData.bias = instrData.thesis?.bias || "Open";
+          if (!instrData.macro_theme) instrData.macro_theme = "";
+        }
+
+        if (!playbookData.shared) playbookData.shared = {};
+        if (!playbookData.shared.macro_clock) playbookData.shared.macro_clock = playbookData.macro_clock || [];
+        if (!playbookData.shared.key_events) playbookData.shared.key_events = playbookData.key_events || [];
+        if (!playbookData.shared.risk_factors) playbookData.shared.risk_factors = playbookData.risk_factors || [];
+
+        const primary = playbookData.instruments[primarySymbol] || Object.values(playbookData.instruments)[0] || {};
+        if (!playbookData.bias) playbookData.bias = primary.bias || "Open";
+        if (!playbookData.thesis) playbookData.thesis = primary.thesis || { bias: "Open", summary: "" };
+        if (!playbookData.macro_theme) playbookData.macro_theme = primary.macro_theme || "";
+
+        if (!playbookData.levels || !Array.isArray(playbookData.levels) || playbookData.levels.length === 0) {
+          const allLevels: any[] = [];
+          for (const [sym, instrData] of Object.entries(playbookData.instruments) as [string, any][]) {
+            for (const l of (instrData.levels || [])) {
+              allLevels.push({ ...l, instrument: sym });
+            }
+          }
+          playbookData.levels = allLevels;
+        }
+        if (!playbookData.scenarios || !Array.isArray(playbookData.scenarios) || playbookData.scenarios.length === 0) {
+          const allScenarios: any[] = [];
+          for (const [sym, instrData] of Object.entries(playbookData.instruments) as [string, any][]) {
+            for (const s of (instrData.scenarios || [])) {
+              allScenarios.push({ ...s, instrument: sym });
+            }
+          }
+          playbookData.scenarios = allScenarios;
+        }
+      } else {
+        playbookData.instruments = null;
+      }
+
       if (!playbookData.structural_zones) {
         playbookData.structural_zones = { bullish_green: [], neutral_yellow: [], bearish_red: [] };
       }
       if (!playbookData.if_then_scenarios) playbookData.if_then_scenarios = [];
-      if (!playbookData.key_events) playbookData.key_events = [];
-      if (!playbookData.risk_factors) playbookData.risk_factors = [];
+      if (!playbookData.key_events) playbookData.key_events = playbookData.shared?.key_events || [];
+      if (!playbookData.risk_factors) playbookData.risk_factors = playbookData.shared?.risk_factors || [];
       if (!playbookData.execution_checklist) playbookData.execution_checklist = [];
       if (!playbookData.levels) playbookData.levels = [];
       if (!playbookData.scenarios) playbookData.scenarios = [];
-      if (!playbookData.macro_clock) playbookData.macro_clock = [];
+      if (!playbookData.macro_clock) playbookData.macro_clock = playbookData.shared?.macro_clock || [];
       if (!playbookData.metadata) {
         playbookData.metadata = { author: "Unknown", report_title: originalFilename, target_horizon: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" }), horizon_type: "Daily" };
       }
@@ -1326,7 +1780,7 @@ When multiple files are uploaded:
       const targetDateStart = parseTargetDate(meta.target_horizon) || today;
       const targetDateEnd = horizonType === "Weekly" ? getEndOfWeek(targetDateStart) : targetDateStart;
 
-      const existingPlaybook = await storage.getPlaybookByTargetDate(tickerId, userId, targetDateStart);
+      const existingPlaybook = await storage.getPlaybookByTargetDate(tickerId, userId, targetDateStart, horizonType);
       let playbook;
       let isUpdate = false;
 
@@ -1415,13 +1869,6 @@ When multiple files are uploaded:
         });
       }
 
-      await storage.createChatMessage({
-        userId,
-        tickerId,
-        role: "user",
-        content: `[Playbook ${isUpdate ? "Updated" : "Generated"}] Uploaded: ${originalFilename}${userMessage ? ` — "${userMessage}"` : ""}`,
-      });
-
       const thesisSummary = typeof playbookData.thesis === "object" ? playbookData.thesis.summary : playbookData.thesis;
       await storage.createChatMessage({
         userId,
@@ -1433,6 +1880,13 @@ When multiple files are uploaded:
       res.status(isUpdate ? 200 : 201).json(playbook);
     } catch (err: any) {
       console.error("Analyze document error:", err);
+      try {
+        const userId = getUserId(res);
+        const tickerIdRaw = parseInt(req.body.tickerId as string);
+        if (!isNaN(tickerIdRaw)) {
+          await storage.createChatMessage({ userId, tickerId: tickerIdRaw, role: "assistant", content: `⚠️ **Processing Error**\n\nSomething went wrong while analyzing the document.\n\n**Error:** ${err.message || "Unknown error"}\n\n**Try:** Use the retry button to resubmit the document.` });
+        }
+      } catch {}
       res.status(500).json({ message: err.message || "Failed to analyze document" });
     } finally {
       for (const path of tempFilePaths) {
@@ -1586,6 +2040,80 @@ When multiple files are uploaded:
     }
   });
 
+  app.post("/api/seed-reports/:tickerId", isAuthenticated, async (req, res) => {
+    try {
+      const userId = getUserId(res);
+      const tickerId = parseInt(req.params.tickerId as string);
+      const ticker = await storage.getTicker(tickerId, userId);
+      if (!ticker) return res.status(404).json({ message: "Ticker not found" });
+
+      const reports = [
+        { title: "Market Analysis and Trades for 2/2", date: "2026-02-02", horizon: "Daily" },
+        { title: "Market Analysis and Trades for 2/3", date: "2026-02-03", horizon: "Daily" },
+        { title: "Market Analysis and Trades for 2/4", date: "2026-02-04", horizon: "Daily" },
+        { title: "Market Analysis and Trades for 2/5", date: "2026-02-05", horizon: "Daily" },
+        { title: "Market Analysis and Trades for 2/6", date: "2026-02-06", horizon: "Daily" },
+        { title: "Market Analysis and Trades for 2/9", date: "2026-02-09", horizon: "Daily" },
+        { title: "Market Analysis and Trades for 2/10", date: "2026-02-10", horizon: "Daily" },
+        { title: "Market Analysis and Trades for 2/11", date: "2026-02-11", horizon: "Daily" },
+        { title: "Market Analysis and Trades for 2/12", date: "2026-02-12", horizon: "Daily" },
+        { title: "Market Analysis and Trades for 2/13", date: "2026-02-13", horizon: "Daily" },
+        { title: "Market Analysis for The Week of 2/15", date: "2026-02-15", horizon: "Weekly", endDate: "2026-02-21" },
+        { title: "Market Analysis and Trades for 2/16-2/17", date: "2026-02-16", horizon: "Daily" },
+        { title: "Market Analysis and Trades for 2/18", date: "2026-02-18", horizon: "Daily" },
+        { title: "Market Analysis and Trades for 2/19", date: "2026-02-19", horizon: "Daily" },
+        { title: "Market Analysis and Trades for 2/20", date: "2026-02-20", horizon: "Daily" },
+        { title: "Market Analysis and Trades for 2/23", date: "2026-02-23", horizon: "Daily" },
+        { title: "Market Analysis and Trades for 2/24", date: "2026-02-24", horizon: "Daily" },
+        { title: "Market Analysis and Trades for 2/25", date: "2026-02-25", horizon: "Daily" },
+        { title: "Market Analysis for The Week of 3/8", date: "2026-03-08", horizon: "Weekly", endDate: "2026-03-14" },
+        { title: "Market Analysis and Trades for 3/9", date: "2026-03-09", horizon: "Daily" },
+      ];
+
+      const created: any[] = [];
+      for (const report of reports) {
+        const existing = await storage.getPlaybookByTargetDate(tickerId, userId, report.date, report.horizon);
+        if (existing) continue;
+
+        const createdDate = new Date(report.date + "T12:00:00-05:00");
+        const pb = await storage.createPlaybook({
+          userId,
+          tickerId,
+          date: report.date,
+          author: "PharmD_KS",
+          horizonType: report.horizon,
+          targetDateStart: report.date,
+          targetDateEnd: (report as any).endDate || report.date,
+          playbookData: {
+            bias: "Open",
+            thesis: { bias: "Open", summary: `Awaiting full analysis — upload the PDF "${report.title}" to generate the complete playbook.` },
+            macro_theme: report.title,
+            metadata: {
+              author: "PharmD_KS",
+              report_title: report.title,
+              target_horizon: report.date,
+              horizon_type: report.horizon,
+            },
+            structural_zones: { bullish_green: [], neutral_yellow: [], bearish_red: [] },
+            if_then_scenarios: [],
+            levels: [],
+            scenarios: [],
+            key_events: [],
+            risk_factors: [],
+            execution_checklist: [],
+            macro_clock: [],
+            tactical_updates: [],
+          },
+        });
+        created.push({ id: pb.id, title: report.title, horizon: report.horizon, date: report.date });
+      }
+
+      res.json({ message: `Seeded ${created.length} reports`, created });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
   // ─── Journal Entries ──────────────────────────────────────────────
 
   app.get("/api/tickers/:tickerId/journal", isAuthenticated, async (req, res) => {
@@ -1636,31 +2164,114 @@ When multiple files are uploaded:
       const ticker = await storage.getTicker(tickerId, userId);
       if (!ticker) return res.status(404).json({ message: "Ticker not found" });
 
-      const todayStr = new Date().toISOString().split("T")[0];
-      const tickerPlaybooks = await storage.getPlaybooksByTicker(tickerId, userId);
-      const todayPlaybook = tickerPlaybooks.find(pb => pb.date === todayStr) || tickerPlaybooks[0] || null;
+      const currentMarketDate = getMarketDate();
+      const contextStack = await storage.getPlaybookContextStack(tickerId, userId, currentMarketDate);
 
-      let playbookContext = "No active playbook available.";
-      if (todayPlaybook) {
-        const pbData = todayPlaybook.playbookData as any;
-        playbookContext = `## ACTIVE PLAYBOOK (${todayPlaybook.date})
+      const formatLevel = (level: any): string => {
+        const price = level.price ?? level.level ?? "?";
+        const label = level.label || level.name || "";
+        const author = level.author_initials || "";
+        const sources = Array.isArray(level.sources) ? level.sources : [];
+        const isConfluence = level.is_confluence === true;
+
+        const priceHigh = level.price_high || level.priceHigh || "";
+        let line = `  • ${price}${priceHigh ? `–${priceHigh}` : ""}`;
+        if (label) line += ` — "${label}"`;
+        if (author) line += ` [${author}]`;
+        if (isConfluence && sources.length > 0) line += ` ⚡ CONFLUENCE (${sources.join(" + ")})`;
+        else if (isConfluence) line += ` ⚡ CONFLUENCE`;
+        else if (sources.length > 0) line += ` (Source: ${sources.join(", ")})`;
+        if (level.rationale) line += ` — ${level.rationale}`;
+        return line;
+      };
+
+      const formatZone = (levels: any[]): string => {
+        if (!levels || levels.length === 0) return "  (none)";
+        return levels.map(formatLevel).join("\n");
+      };
+
+      const formatScenario = (s: any): string => {
+        const author = s.author_initials ? ` [${s.author_initials}]` : "";
+        const confluence = s.is_confluence ? " ⚡ CONFLUENCE" : "";
+        const sources = Array.isArray(s.sources) && s.sources.length > 0 ? ` (${s.sources.join(" + ")})` : "";
+        return `- IF: ${s.condition || "N/A"}${author}${confluence}${sources}\n  THEN: ${s.outcome || "N/A"}`;
+      };
+
+      const formatFullPlaybook = (pb: any, label: string): string => {
+        const pbData = pb.playbookData as any;
+        const thesisText = pbData.thesis
+          ? (typeof pbData.thesis === "object" ? (pbData.thesis.summary || JSON.stringify(pbData.thesis)) : String(pbData.thesis))
+          : "N/A";
+        return `## ${label} PLAYBOOK (${pb.date})
+Horizon: ${pb.horizonType || "Daily"}
 Bias: ${pbData.bias || "Open"}
 Macro Theme: ${pbData.macro_theme || "N/A"}
-Thesis: ${pbData.thesis || "N/A"}
+Thesis: ${thesisText}
 
-### Structural Zones:
-GREEN (Bullish): ${JSON.stringify(pbData.structural_zones?.bullish_green || [])}
-YELLOW (Neutral): ${JSON.stringify(pbData.structural_zones?.neutral_yellow || [])}
-RED (Bearish): ${JSON.stringify(pbData.structural_zones?.bearish_red || [])}
+### Structural Zones (with provenance):
+GREEN (Bullish):
+${formatZone(pbData.structural_zones?.bullish_green)}
+YELLOW (Neutral):
+${formatZone(pbData.structural_zones?.neutral_yellow)}
+RED (Bearish):
+${formatZone(pbData.structural_zones?.bearish_red)}
 
-### If/Then Scenarios:
-${(pbData.if_then_scenarios || []).map((s: any) => `- ${s.condition} → ${s.outcome}`).join("\n")}
+### If/Then Scenarios (with provenance):
+${(pbData.if_then_scenarios || []).map(formatScenario).join("\n")}
 
 ### Key Events:
 ${(pbData.key_events || []).map((e: any) => `- ${e.title} at ${e.time} (${e.impact})`).join("\n")}`;
+      };
+
+      const formatSummaryPlaybook = (pb: any, label: string): string => {
+        const pbData = pb.playbookData as any;
+        const thesisText = pbData.thesis
+          ? (typeof pbData.thesis === "object" ? (pbData.thesis.summary || JSON.stringify(pbData.thesis)) : String(pbData.thesis))
+          : "N/A";
+        let out = `## ${label} PLAYBOOK (${pb.date})
+Horizon: ${pb.horizonType || "Weekly"}
+Bias: ${pbData.bias || "Open"}
+Macro Theme: ${pbData.macro_theme || "N/A"}
+Thesis: ${String(thesisText).slice(0, 500)}`;
+        if (pbData.structural_zones) {
+          const green = pbData.structural_zones.bullish_green || [];
+          const yellow = pbData.structural_zones.neutral_yellow || [];
+          const red = pbData.structural_zones.bearish_red || [];
+          if (green.length > 0) out += `\nWeekly GREEN Levels: ${green.map((l: any) => `${l.price} (${l.label || ""})`).join(", ")}`;
+          if (yellow.length > 0) out += `\nWeekly YELLOW Levels: ${yellow.map((l: any) => `${l.price} (${l.label || ""})`).join(", ")}`;
+          if (red.length > 0) out += `\nWeekly RED Levels: ${red.map((l: any) => `${l.price} (${l.label || ""})`).join(", ")}`;
+        }
+        return out;
+      };
+
+      let playbookContext = `Current Market Date: ${currentMarketDate}\n\n`;
+      if (contextStack.daily) {
+        playbookContext += formatFullPlaybook(contextStack.daily, "DAILY") + "\n\n";
+      }
+      if (contextStack.weekly) {
+        playbookContext += formatSummaryPlaybook(contextStack.weekly, "WEEKLY") + "\n\n";
+      }
+      if (contextStack.monthly) {
+        const monthData = contextStack.monthly.playbookData as any;
+        playbookContext += `## MONTHLY PLAYBOOK (${contextStack.monthly.date})
+Bias: ${monthData.bias || "Open"}
+Macro Theme: ${monthData.macro_theme || "N/A"}\n\n`;
+      }
+      if (!contextStack.daily && !contextStack.weekly && !contextStack.monthly) {
+        playbookContext += "No active playbooks available for today's date.\n";
       }
 
-      const tacticalPrompt = `You are a Tactical Trading Assistant for ${ticker.symbol} in the Action Dashboard. You provide real-time execution guidance during live trading sessions.
+      const tacticalPrompt = `You are a Tactical Trading Assistant for ${ticker.symbol} in the Action Dashboard. Today's market date is ${currentMarketDate} (New York time). You provide real-time execution guidance during live trading sessions.
+
+## CONTEXT STACK — PLAYBOOK HIERARCHY
+
+You have a "Context Stack" of playbooks: [Daily], [Weekly], and [Monthly]. Use them according to these priority rules:
+
+- **Priority 1**: Always defer to the **Daily Playbook** for specific price levels and If/Then triggers during RTH. The Daily plan has the most granular, session-specific data.
+- **Priority 2**: Use the **Weekly Playbook** to explain the "Big Picture" — e.g., if we are in a 4-day balance, what the weekly directional bias is.
+- **Priority 3**: Use the **Monthly Playbook** for macro context only.
+- **Conflict Resolution**: If the Daily plan says "Neutral" but the Weekly says "Bullish," you MUST explain both: "While the weekly blueprint remains bullish, today's daily plan is neutral due to high-range chop." Never silently pick one.
+- **Date Awareness**: Only reference playbooks that apply to today (${currentMarketDate}). Do NOT confuse dates or use expired data.
 
 ## YOUR ROLE
 You are the trader's execution partner. When they drop a chart screenshot, you:
@@ -1693,12 +2304,45 @@ When a chart image is uploaded:
 3. Identify any visible horizontal lines, trendlines, or annotations
 4. Always prefer what you SEE in the chart over assumptions
 
+## TACTICAL REASONING REFINEMENT: Bridging Plan to Action
+
+### 1. Prioritize Labels over Numbers
+When analyzing a chart, always look for the text labels next to the price (e.g., 'RTH Open + 48', 'Core Bot', 'POC'). Use these names in your summary so the user knows *which* part of the plan is active.
+- WRONG: "Price is at resistance around 6,900.75"
+- RIGHT: "Price is testing 6,900.75 (The RTH Open + 48 ratio). This level is key because staying below it keeps the market in a 'Volatility Crush' mode as PharmD mentioned."
+
+### 2. Level Provenance
+When referencing a price level from the playbook, ALWAYS include:
+- The level's label/name if available (e.g., "RTH Open + 48")
+- The author source (e.g., "as PharmD noted" or "from Izzy's analysis")
+- Why it matters in the current context
+- WRONG: "6,900.75 is resistance"
+- RIGHT: "6,900.75 (RTH + 48 ratio) [PharmD] — this is the key resistance that defines whether bulls regain control"
+
+### 3. Confluence Awareness
+When a level is marked as ⚡ CONFLUENCE in the playbook, give it MAXIMUM emphasis:
+- Lead with the confluence status: "This is a HIGH-CONFIDENCE level where multiple experts agree"
+- Name the contributing authors: "Both Izzy and PharmD identified this zone"
+- Confluence levels should be mentioned FIRST when multiple levels are nearby
+- If the current price is near a confluence level, make it the HEADLINE of your response
+
+### 4. Volume Analysis
+If you see large red bars at a resistance level, explicitly mention 'Aggressive Selling Volume' to confirm the rejection. If you see large green bars at support, mention 'Aggressive Buying Volume'. Volume context validates whether a level is holding or breaking.
+- Example: "The massive red volume spike at 10:00 AM when price touched 6,922 confirms aggressive selling — this validates the playbook's bearish rejection zone."
+
+### 5. LAAF/LBAF Trap Warnings
+On OPEX days (monthly options expiration, typically 3rd Friday), earnings days, or FOMC days, actively warn the user about fake-out risk:
+- If price moves ABOVE a key resistance, warn: "This move above [level] might be a Fake-out (LAAF) unless a 15-minute candle closes and stays above it. Wait for confirmation."
+- If price moves BELOW a key support, warn: "This move below [level] might be a Bear Trap (LBAF) unless a 15-minute candle closes below it."
+- Check the Key Events section of the playbook for any scheduled events that increase trap risk.
+
 ## RESPONSE FORMAT
 Keep responses concise and actionable for a live trading session:
 - **Current Price**: [from chart]
 - **Zone**: [Green/Yellow/Red based on playbook]
-- **Active Scenario**: [matching If/Then from playbook]
-- **Guidance**: [1-2 sentences of actionable advice]
+- **Active Scenario**: [matching If/Then from playbook, with author attribution]
+- **Confluence Alert**: [if near a confluence level, highlight it prominently]
+- **Guidance**: [1-2 sentences of actionable advice with level labels and author sources]
 
 ${playbookContext}`;
 
@@ -1766,12 +2410,116 @@ ${playbookContext}`;
 
       await storage.createChatMessage({ userId, tickerId, role: "user", content: content || (uploadedFiles.length > 0 ? `[${uploadedFiles.length} file${uploadedFiles.length > 1 ? "s" : ""}: ${fileNames}]` : "[Chart Screenshot uploaded]") });
 
-      const result = await model.generateContent({ contents: [{ role: "user", parts }] });
-      const aiText = result.response.text();
+      let aiText: string;
+      let isFallback = false;
 
-      const aiMsg = await storage.createChatMessage({ userId, tickerId, role: "assistant", content: aiText });
+      const MAX_TACTICAL_RETRIES = 3;
+      let lastTacticalErr: any = null;
+      for (let attempt = 0; attempt < MAX_TACTICAL_RETRIES; attempt++) {
+        try {
+          const result = await model.generateContent({ contents: [{ role: "user", parts }] });
+          aiText = result.response.text();
+          lastTacticalErr = null;
+          break;
+        } catch (tacticalErr: any) {
+          lastTacticalErr = tacticalErr;
+          const status = tacticalErr?.status || tacticalErr?.httpStatusCode || tacticalErr?.code;
+          const isRetryable = status === 503 || status === 429 || String(tacticalErr?.message || "").includes("503") || String(tacticalErr?.message || "").includes("429") || String(tacticalErr?.message || "").includes("Service Unavailable") || String(tacticalErr?.message || "").includes("overloaded");
+          if (isRetryable && attempt < MAX_TACTICAL_RETRIES - 1) {
+            const delay = Math.pow(2, attempt) * 1000;
+            console.log(`Tactical API error (${status || "unknown"}). Retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_TACTICAL_RETRIES})...`);
+            await new Promise(r => setTimeout(r, delay));
+            continue;
+          }
+          break;
+        }
+      }
 
-      res.json({ userMessage: { role: "user", content }, aiMessage: aiMsg });
+      if (lastTacticalErr) {
+        console.error("Tactical Gemini API error after retries:", lastTacticalErr);
+        const dailyPb = contextStack.daily;
+        if (dailyPb) {
+          const pbData = dailyPb.playbookData as any;
+          const levelsSummary: string[] = [];
+          if (pbData?.structural_zones) {
+            const zones = pbData.structural_zones;
+            if (zones.bullish_green?.length) levelsSummary.push(...zones.bullish_green.slice(0, 3).map((l: any) => `🟢 ${l.price} (${l.label || "support"})`));
+            if (zones.neutral_yellow?.length) levelsSummary.push(...zones.neutral_yellow.slice(0, 2).map((l: any) => `🟡 ${l.price} (${l.label || "neutral"})`));
+            if (zones.bearish_red?.length) levelsSummary.push(...zones.bearish_red.slice(0, 3).map((l: any) => `🔴 ${l.price} (${l.label || "resistance"})`));
+          }
+          if (pbData?.levels?.length && levelsSummary.length === 0) {
+            levelsSummary.push(...pbData.levels.slice(0, 5).map((l: any) => `${l.price} (${l.label || l.type || "level"})`));
+          }
+          aiText = `AI analysis engine is temporarily unavailable, but your **${ticker.symbol}** playbook levels are loaded:\n\n${levelsSummary.length > 0 ? levelsSummary.join("\n") : "No levels extracted yet."}\n\n**Try again** when the service recovers for full tactical analysis.`;
+        } else {
+          aiText = `AI analysis engine is temporarily unavailable for **${ticker.symbol}**. No daily playbook found for today. Upload a game plan first, then retry for tactical analysis.`;
+        }
+        isFallback = true;
+      }
+
+      const aiMsg = await storage.createChatMessage({ userId, tickerId, role: "assistant", content: aiText! });
+
+      if (!isFallback && contextStack.daily) {
+        try {
+          const dailyData = contextStack.daily.playbookData as any;
+          const tacticalUpdates = Array.isArray(dailyData.tactical_updates) ? [...dailyData.tactical_updates] : [];
+          tacticalUpdates.push({
+            timestamp: new Date().toISOString(),
+            source: "Tactical Chat",
+            author: "Tactical AI",
+            addedLevels: [],
+            addedScenarios: [],
+            note: aiText!.slice(0, 500),
+          });
+          await storage.updatePlaybook(contextStack.daily.id, userId, {
+            playbookData: { ...dailyData, tactical_updates: tacticalUpdates },
+          });
+
+          if (contextStack.weekly) {
+            const weeklyData = contextStack.weekly.playbookData as any;
+            const weeklyScenarios = weeklyData.if_then_scenarios || weeklyData.scenarios || [];
+            const priceMatches = aiText!.match(/\b\d{4,5}(?:\.\d{1,2})?\b/g);
+            if (priceMatches && weeklyScenarios.length > 0) {
+              const weeklyUpdates = Array.isArray(weeklyData.tactical_updates) ? [...weeklyData.tactical_updates] : [];
+              const summary = `${currentMarketDate} Tactical Update: ${aiText!.slice(0, 200)}`;
+              weeklyUpdates.push({
+                timestamp: new Date().toISOString(),
+                source: "Tactical Chat (cross-write)",
+                author: "Tactical AI",
+                addedLevels: [],
+                addedScenarios: [],
+                note: summary,
+              });
+              await storage.updatePlaybook(contextStack.weekly.id, userId, {
+                playbookData: { ...weeklyData, tactical_updates: weeklyUpdates },
+              });
+            }
+          }
+
+          if (contextStack.monthly) {
+            const monthlyData = contextStack.monthly.playbookData as any;
+            const mentionsYearly = /yearly|annual|all.time|macro.shift|monthly.pivot/i.test(aiText!);
+            if (mentionsYearly) {
+              const monthlyUpdates = Array.isArray(monthlyData.tactical_updates) ? [...monthlyData.tactical_updates] : [];
+              monthlyUpdates.push({
+                timestamp: new Date().toISOString(),
+                source: "Tactical Chat (cross-write)",
+                author: "Tactical AI",
+                addedLevels: [],
+                addedScenarios: [],
+                note: `${currentMarketDate}: ${aiText!.slice(0, 200)}`,
+              });
+              await storage.updatePlaybook(contextStack.monthly.id, userId, {
+                playbookData: { ...monthlyData, tactical_updates: monthlyUpdates },
+              });
+            }
+          }
+        } catch (tripleWriteErr) {
+          console.error("Triple-write error (non-fatal):", tripleWriteErr);
+        }
+      }
+
+      res.json({ userMessage: { role: "user", content }, aiMessage: aiMsg, fallback: isFallback });
     } catch (err: any) {
       console.error("Tactical chat error:", err);
       res.status(500).json({ message: err.message || "Tactical analysis failed" });

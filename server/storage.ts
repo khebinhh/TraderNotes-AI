@@ -1,4 +1,4 @@
-import { eq, desc, and } from "drizzle-orm";
+import { eq, desc, and, gte, lte, or, sql } from "drizzle-orm";
 import { db } from "./db";
 import {
   tickers, notes, calculatedLevels, dailyChecklists, checklistItems, events, chatMessages, playbooks, journalEntries, userWorkspaces,
@@ -53,7 +53,8 @@ export interface IStorage {
   getPlaybooks(userId: string): Promise<Playbook[]>;
   getPlaybooksByTicker(tickerId: number, userId: string): Promise<Playbook[]>;
   getPlaybook(id: number, userId: string): Promise<Playbook | undefined>;
-  getPlaybookByTargetDate(tickerId: number, userId: string, targetDate: string): Promise<Playbook | undefined>;
+  getPlaybookByTargetDate(tickerId: number, userId: string, targetDate: string, horizonType?: string): Promise<Playbook | undefined>;
+  getPlaybookContextStack(tickerId: number, userId: string, marketDate: string): Promise<{ daily: Playbook | null; weekly: Playbook | null; monthly: Playbook | null }>;
   createPlaybook(playbook: InsertPlaybook): Promise<Playbook>;
   updatePlaybook(id: number, userId: string, data: Partial<InsertPlaybook>): Promise<Playbook | undefined>;
   updatePlaybookReview(id: number, userId: string, review: string): Promise<Playbook | undefined>;
@@ -223,11 +224,74 @@ export class DatabaseStorage implements IStorage {
     return pb;
   }
 
-  async getPlaybookByTargetDate(tickerId: number, userId: string, targetDate: string): Promise<Playbook | undefined> {
+  async getPlaybookByTargetDate(tickerId: number, userId: string, targetDate: string, horizonType?: string): Promise<Playbook | undefined> {
+    const ht = horizonType || "Daily";
     const [pb] = await db.select().from(playbooks).where(
-      and(eq(playbooks.tickerId, tickerId), eq(playbooks.userId, userId), eq(playbooks.targetDateStart, targetDate))
+      and(
+        eq(playbooks.tickerId, tickerId),
+        eq(playbooks.userId, userId),
+        eq(playbooks.targetDateStart, targetDate),
+        eq(playbooks.horizonType, ht)
+      )
     );
     return pb;
+  }
+
+  async getPlaybookContextStack(tickerId: number, userId: string, marketDate: string): Promise<{ daily: Playbook | null; weekly: Playbook | null; monthly: Playbook | null }> {
+    const allPlaybooks = await db.select().from(playbooks)
+      .where(and(eq(playbooks.tickerId, tickerId), eq(playbooks.userId, userId)))
+      .orderBy(desc(playbooks.createdAt));
+
+    let daily: Playbook | null = null;
+    let weekly: Playbook | null = null;
+    let monthly: Playbook | null = null;
+
+    const marketMonth = marketDate.slice(0, 7);
+
+    for (const pb of allPlaybooks) {
+      const ht = (pb.horizonType || "Daily").toLowerCase();
+
+      if (!daily && (ht === "daily" || ht === "")) {
+        if (pb.targetDateStart === marketDate || (!pb.targetDateStart && pb.date === marketDate)) {
+          daily = pb;
+        }
+      }
+
+      if (!weekly && ht === "weekly") {
+        if (pb.targetDateStart && pb.targetDateEnd) {
+          if (pb.targetDateStart <= marketDate && pb.targetDateEnd >= marketDate) {
+            weekly = pb;
+          }
+        } else if (pb.targetDateStart && !pb.targetDateEnd) {
+          const start = new Date(pb.targetDateStart + "T00:00:00");
+          const end = new Date(start);
+          end.setDate(end.getDate() + 6);
+          const endStr = end.toISOString().split("T")[0];
+          if (pb.targetDateStart <= marketDate && endStr >= marketDate) {
+            weekly = pb;
+          }
+        } else if (pb.date) {
+          const start = new Date(pb.date + "T00:00:00");
+          const end = new Date(start);
+          end.setDate(end.getDate() + 6);
+          const endStr = end.toISOString().split("T")[0];
+          if (pb.date <= marketDate && endStr >= marketDate) {
+            weekly = pb;
+          }
+        }
+      }
+
+      if (!monthly && ht === "monthly") {
+        const pbMonth = pb.targetDateStart ? pb.targetDateStart.slice(0, 7) : (pb.date ? pb.date.slice(0, 7) : "");
+        if (pbMonth === marketMonth) {
+          monthly = pb;
+        }
+      }
+
+      if (daily && weekly && monthly) break;
+    }
+
+    return { daily, weekly, monthly };
   }
 
   async createPlaybook(playbook: InsertPlaybook): Promise<Playbook> {

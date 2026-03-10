@@ -54,14 +54,14 @@ export function TickerTabs({ tickers, activeTickerId, onSelectTicker, onRemoveTi
   };
 
   return (
-    <div className="h-10 border-b border-border bg-card/80 flex items-center px-2 gap-1 shrink-0 overflow-x-auto" data-testid="ticker-tabs-bar">
+    <div className="h-10 border-b border-border bg-card/80 flex items-center px-1 sm:px-2 gap-0.5 sm:gap-1 shrink-0 overflow-x-auto scrollbar-none" data-testid="ticker-tabs-bar">
       {tickers.map((ticker) => {
         const isActive = ticker.id === activeTickerId;
         return (
           <div
             key={ticker.id}
             className={cn(
-              "group flex items-center gap-1.5 px-3 py-1.5 rounded-t text-xs font-bold font-mono transition-all whitespace-nowrap border-b-2 cursor-pointer",
+              "group flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1.5 rounded-t text-xs font-bold font-mono transition-all whitespace-nowrap border-b-2 cursor-pointer min-w-0",
               isActive
                 ? "bg-background text-amber-400 border-b-amber-400 shadow-[0_-1px_8px_-3px_rgba(245,158,11,0.25)]"
                 : "bg-transparent text-muted-foreground hover:text-foreground hover:bg-muted/30 border-b-transparent"

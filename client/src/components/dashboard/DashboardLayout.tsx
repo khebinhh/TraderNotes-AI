@@ -9,9 +9,13 @@ import {
   type TickerData, type NoteData, type FullNote, type PriceRatioData
 } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
-import { LogOut, BookOpen, BarChart3 } from "lucide-react";
+import { LogOut, BookOpen, BarChart3, Menu } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { useIsMobile } from "@/hooks/use-mobile";
+import {
+  Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription, SheetTrigger,
+} from "@/components/ui/sheet";
 
 type RoomMode = "strategy" | "action";
 
@@ -177,6 +181,9 @@ export function DashboardLayout() {
     staleTime: 5 * 60 * 1000,
   });
 
+  const isMobile = useIsMobile();
+  const [profileSheetOpen, setProfileSheetOpen] = useState(false);
+
   const [clockTime, setClockTime] = useState(new Date().toLocaleTimeString());
   const [nyTime, setNyTime] = useState(
     new Date().toLocaleTimeString("en-US", { timeZone: "America/New_York" })
@@ -204,11 +211,11 @@ export function DashboardLayout() {
 
   return (
     <div className="h-screen w-full bg-background text-foreground overflow-hidden flex flex-col">
-      <header className="h-11 border-b border-border bg-card flex items-center px-4 justify-between shrink-0 z-10">
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2">
+      <header className="h-11 border-b border-border bg-card flex items-center px-2 sm:px-4 justify-between shrink-0 z-10">
+        <div className="flex items-center gap-2 sm:gap-4 min-w-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <div className="h-4 w-4 bg-primary rounded-sm animate-pulse" />
-            <h1 className="text-sm font-bold tracking-widest uppercase font-mono text-primary" data-testid="text-app-title">
+            <h1 className="text-xs sm:text-sm font-bold tracking-widest uppercase font-mono text-primary hidden sm:block" data-testid="text-app-title">
               TraderNotes AI
             </h1>
           </div>
@@ -218,64 +225,110 @@ export function DashboardLayout() {
               onClick={() => setRoomMode("strategy")}
               data-testid="button-strategy-room"
               className={cn(
-                "flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-mono font-bold tracking-wide transition-all",
+                "flex items-center gap-1.5 px-2 sm:px-3 py-1 rounded-md text-xs font-mono font-bold tracking-wide transition-all",
                 roomMode === "strategy"
                   ? "bg-primary text-primary-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground"
               )}
             >
               <BookOpen className="h-3 w-3" />
-              Strategy Room
+              <span className="hidden sm:inline">Strategy Room</span>
             </button>
             <button
               onClick={() => setRoomMode("action")}
               data-testid="button-action-dashboard"
               className={cn(
-                "flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-mono font-bold tracking-wide transition-all",
+                "flex items-center gap-1.5 px-2 sm:px-3 py-1 rounded-md text-xs font-mono font-bold tracking-wide transition-all",
                 roomMode === "action"
                   ? "bg-primary text-primary-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground"
               )}
             >
               <BarChart3 className="h-3 w-3" />
-              Action Dashboard
+              <span className="hidden sm:inline">Action Dashboard</span>
             </button>
           </div>
         </div>
 
-        <div className="flex items-center gap-4 text-xs font-mono text-muted-foreground">
+        <div className="flex items-center gap-2 sm:gap-4 text-xs font-mono text-muted-foreground shrink-0">
           <div className="flex items-center gap-1">
             <span className="w-2 h-2 rounded-full bg-green-500" />
-            <span data-testid="status-system">ONLINE</span>
+            <span className="hidden sm:inline" data-testid="status-system">ONLINE</span>
           </div>
-          <div className="flex items-center gap-3" data-testid="text-clock">
-            <div className="flex flex-col items-end leading-none">
-              <span className="text-[10px] text-muted-foreground/60">LOCAL</span>
-              <span>{clockTime}</span>
+          {isMobile ? (
+            <div className="flex items-center gap-1" data-testid="text-clock">
+              <span className="text-[10px] text-amber-400/80">NY</span>
+              <span className="text-amber-400 text-[11px]" data-testid="text-ny-clock">{nyTime}</span>
             </div>
-            <div className="w-px h-5 bg-border" />
-            <div className="flex flex-col items-end leading-none">
-              <span className="text-[10px] text-amber-400/80">NYC</span>
-              <span className="text-amber-400" data-testid="text-ny-clock">{nyTime}</span>
+          ) : (
+            <div className="flex items-center gap-3" data-testid="text-clock">
+              <div className="flex flex-col items-end leading-none">
+                <span className="text-[10px] text-muted-foreground/60">LOCAL</span>
+                <span>{clockTime}</span>
+              </div>
+              <div className="w-px h-5 bg-border" />
+              <div className="flex flex-col items-end leading-none">
+                <span className="text-[10px] text-amber-400/80">NYC</span>
+                <span className="text-amber-400" data-testid="text-ny-clock">{nyTime}</span>
+              </div>
             </div>
-          </div>
+          )}
           {user && (
-            <div className="flex items-center gap-3 ml-2 pl-3 border-l border-border">
-              {user.profileImageUrl && (
-                <img src={user.profileImageUrl} alt="" className="w-5 h-5 rounded-full" data-testid="img-user-avatar" />
+            <>
+              {isMobile ? (
+                <Sheet open={profileSheetOpen} onOpenChange={setProfileSheetOpen}>
+                  <SheetTrigger asChild>
+                    <button
+                      className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/30 transition-colors"
+                      data-testid="button-mobile-menu"
+                    >
+                      <Menu className="h-4 w-4" />
+                    </button>
+                  </SheetTrigger>
+                  <SheetContent side="right" className="w-64 bg-card p-4">
+                    <SheetHeader>
+                      <SheetTitle className="text-sm font-mono">Profile</SheetTitle>
+                      <SheetDescription className="sr-only">User profile and settings</SheetDescription>
+                    </SheetHeader>
+                    <div className="mt-6 space-y-4">
+                      <div className="flex items-center gap-3">
+                        {user.profileImageUrl && (
+                          <img src={user.profileImageUrl} alt="" className="w-8 h-8 rounded-full" data-testid="img-user-avatar" />
+                        )}
+                        <span className="text-sm font-mono text-primary" data-testid="text-username">
+                          {user.firstName || user.email || "Trader"}
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => { setProfileSheetOpen(false); logout(); }}
+                        className="flex items-center gap-2 w-full px-3 py-2 rounded-md text-sm font-mono text-muted-foreground hover:text-red-400 hover:bg-red-400/10 transition-colors"
+                        data-testid="button-logout"
+                      >
+                        <LogOut className="h-4 w-4" />
+                        Sign out
+                      </button>
+                    </div>
+                  </SheetContent>
+                </Sheet>
+              ) : (
+                <div className="flex items-center gap-3 ml-2 pl-3 border-l border-border">
+                  {user.profileImageUrl && (
+                    <img src={user.profileImageUrl} alt="" className="w-5 h-5 rounded-full" data-testid="img-user-avatar" />
+                  )}
+                  <span className="text-primary" data-testid="text-username">
+                    {user.firstName || user.email || "Trader"}
+                  </span>
+                  <button
+                    onClick={() => logout()}
+                    className="text-muted-foreground hover:text-red-400 transition-colors"
+                    data-testid="button-logout"
+                    title="Sign out"
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               )}
-              <span className="text-primary" data-testid="text-username">
-                {user.firstName || user.email || "Trader"}
-              </span>
-              <button
-                onClick={() => logout()}
-                className="text-muted-foreground hover:text-red-400 transition-colors"
-                data-testid="button-logout"
-                title="Sign out"
-              >
-                <LogOut className="h-3.5 w-3.5" />
-              </button>
-            </div>
+            </>
           )}
         </div>
       </header>

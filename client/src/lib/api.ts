@@ -152,7 +152,7 @@ export async function toggleChecklistItem(id: number, isCompleted: boolean): Pro
   return res.json();
 }
 
-export async function sendChatMessage(tickerId: number, content: string, files?: File[]): Promise<{ userMessage: ChatMsg; aiMessage: ChatMsg; createdNoteId?: number | null }> {
+export async function sendChatMessage(tickerId: number, content: string, files?: File[]): Promise<{ userMessage: ChatMsg; aiMessage: ChatMsg; createdNoteId?: number | null; fallback?: boolean }> {
   const formData = new FormData();
   formData.append("content", content);
   if (files && files.length > 0) {
@@ -225,6 +225,9 @@ export interface PlaybookEnhancedLevel {
   context: string;
   source: string;
   conviction: string;
+  is_confluence?: boolean;
+  sources?: string[];
+  author_initials?: string;
 }
 
 export interface PlaybookScenario {
@@ -243,6 +246,17 @@ export interface PlaybookEnhancedScenario {
   rating: string;
   source: string;
   cross_market_filter: string | null;
+  timing_requirement?: string | null;
+  plan_type?: "primary" | "contingency";
+  is_confluence?: boolean;
+  sources?: string[];
+  author_initials?: string;
+}
+
+export interface PlaybookStrategyRule {
+  label: string;
+  value: string;
+  description: string;
 }
 
 export interface PlaybookEvent {
@@ -263,6 +277,7 @@ export interface PlaybookMetadata {
   report_title: string;
   target_horizon: string;
   horizon_type: "Daily" | "Weekly" | "Monthly";
+  sentiment_warning?: string | null;
 }
 
 export interface TacticalUpdate {
@@ -272,6 +287,22 @@ export interface TacticalUpdate {
   addedLevels: PlaybookEnhancedLevel[];
   addedScenarios: PlaybookEnhancedScenario[];
   note: string;
+}
+
+export interface InstrumentPlaybookData {
+  bias: string;
+  thesis: string | { bias: string; summary: string };
+  macro_theme?: string;
+  levels: PlaybookEnhancedLevel[];
+  scenarios: PlaybookEnhancedScenario[];
+  strategy_rules?: PlaybookStrategyRule[];
+  execution_checklist: string[];
+}
+
+export interface PlaybookSharedData {
+  macro_clock?: PlaybookMacroClock[];
+  key_events?: PlaybookEvent[];
+  risk_factors?: string[];
 }
 
 export interface PlaybookData {
@@ -291,7 +322,10 @@ export interface PlaybookData {
   macro_clock?: PlaybookMacroClock[];
   levels?: PlaybookEnhancedLevel[];
   scenarios?: PlaybookEnhancedScenario[];
+  strategy_rules?: PlaybookStrategyRule[];
   tactical_updates?: TacticalUpdate[];
+  instruments?: Record<string, InstrumentPlaybookData> | null;
+  shared?: PlaybookSharedData;
 }
 
 export interface Playbook {
@@ -351,6 +385,19 @@ export function isFuturesSymbol(symbol: string): boolean {
   return FUTURES_SYMBOLS.includes(symbol);
 }
 
+export function normalizeTickerSymbol(symbol: string): string {
+  const s = symbol.toUpperCase().replace(/[!]/g, "");
+  if (s === "ES1" || s === "ES" || s.includes("S&P")) return "ES";
+  if (s === "NQ1" || s === "NQ" || s.includes("NASDAQ")) return "NQ";
+  return s;
+}
+
+export function getInstrumentData(data: PlaybookData, tickerSymbol: string): InstrumentPlaybookData | null {
+  if (!data.instruments) return null;
+  const normalized = normalizeTickerSymbol(tickerSymbol);
+  return data.instruments[normalized] || null;
+}
+
 export interface JournalEntry {
   id: number;
   userId: string | null;
@@ -376,7 +423,7 @@ export async function deleteJournalEntry(id: number): Promise<void> {
   await apiRequest("DELETE", `/api/journal/${id}`);
 }
 
-export async function sendTacticalChat(tickerId: number, content: string, files?: File[]): Promise<{ userMessage: ChatMsg; aiMessage: ChatMsg }> {
+export async function sendTacticalChat(tickerId: number, content: string, files?: File[]): Promise<{ userMessage: ChatMsg; aiMessage: ChatMsg; fallback?: boolean }> {
   const formData = new FormData();
   formData.append("content", content);
   if (files && files.length > 0) {
