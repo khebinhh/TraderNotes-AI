@@ -34,7 +34,7 @@ export function AITutor({ activeNote, activeTicker }: AITutorProps) {
 
   const chatMutation = useMutation({
     mutationFn: ({ content, file }: { content: string; file?: File }) =>
-      sendChatMessage(activeTicker!.id, content, file),
+      sendChatMessage(activeTicker!.id, content, file ? [file] : undefined),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/tickers", activeTicker?.id, "chat"] });
     },

@@ -423,6 +423,106 @@ export async function deleteJournalEntry(id: number): Promise<void> {
   await apiRequest("DELETE", `/api/journal/${id}`);
 }
 
+export interface DiaryAnalysis {
+  market_achievement: {
+    summary: string;
+    session_outcome: string;
+    key_moves: string[];
+  };
+  bigger_picture: {
+    summary: string;
+    weekly_impact: string;
+    monthly_impact: string;
+  };
+  plan_adherence: {
+    grade: string;
+    grade_rationale: string;
+    levels_defended: Array<{ price: number; label: string; status: string }>;
+    levels_lost: Array<{ price: number; label: string; status: string }>;
+    scenarios_triggered: Array<{ scenario: string; result: string; grade: string }>;
+  };
+  closing_bias: string;
+  lesson_of_the_day: string;
+  prep_for_tomorrow: string;
+  road_ahead?: string;
+  image_references?: Array<{ filename: string; path: string; context?: string; uploadedAt?: string; timestamp?: string; ai_critique?: string }>;
+  blueprint_alignment?: {
+    weekly: {
+      status: "in_line" | "diverged" | "no_data";
+      checked_events: Array<{ event: string; deadline: string; condition: string; result: "passed" | "failed" | "pending"; explanation: string }>;
+      rationale: string;
+    };
+    monthly: {
+      status: "in_line" | "diverged" | "holding" | "no_data";
+      checked_events: Array<{ event: string; deadline: string; condition: string; result: "passed" | "failed" | "pending"; explanation: string }>;
+      rationale: string;
+    };
+  };
+  chat_recap?: Array<{ question: string; answer: string; timestamp?: string }>;
+}
+
+export interface DiaryEntry {
+  id: number;
+  userId: string | null;
+  tickerId: number | null;
+  date: string;
+  aiAnalysis: DiaryAnalysis | null;
+  userClosingThought: string | null;
+  isFinalized: boolean;
+  planAdherenceGrade: string | null;
+  closingBias: string | null;
+  dailyChartUrl: string | null;
+  weeklyChartUrl: string | null;
+  monthlyChartUrl: string | null;
+  createdAt: string;
+}
+
+export async function fetchDiaryEntries(tickerId: number): Promise<DiaryEntry[]> {
+  const res = await fetch(`/api/tickers/${tickerId}/diary`, { credentials: "include" });
+  if (!res.ok) throw new Error("Failed to fetch diary");
+  return res.json();
+}
+
+export async function fetchDiaryEntry(id: number): Promise<DiaryEntry> {
+  const res = await fetch(`/api/diary/entry/${id}`, { credentials: "include" });
+  if (!res.ok) throw new Error("Failed to fetch diary entry");
+  return res.json();
+}
+
+export async function generateDiary(tickerId: number, date: string, charts?: { daily?: File; weekly?: File; monthly?: File }): Promise<DiaryEntry> {
+  const formData = new FormData();
+  formData.append("tickerId", String(tickerId));
+  formData.append("date", date);
+  if (charts?.daily) formData.append("daily_chart", charts.daily);
+  if (charts?.weekly) formData.append("weekly_chart", charts.weekly);
+  if (charts?.monthly) formData.append("monthly_chart", charts.monthly);
+  const res = await fetch("/api/diary/generate", {
+    method: "POST",
+    body: formData,
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: "Diary generation failed" }));
+    throw new Error(err.message);
+  }
+  return res.json();
+}
+
+export async function updateDiary(id: number, data: { userClosingThought?: string; isFinalized?: boolean }): Promise<DiaryEntry> {
+  const res = await apiRequest("PATCH", `/api/diary/${id}`, data);
+  return res.json();
+}
+
+export async function regenerateDiary(id: number): Promise<DiaryEntry> {
+  const res = await apiRequest("PATCH", `/api/diary/${id}/regenerate`);
+  return res.json();
+}
+
+export async function sendDiaryChat(diaryId: number, message: string): Promise<{ message: string }> {
+  const res = await apiRequest("POST", `/api/diary/${diaryId}/chat`, { message });
+  return res.json();
+}
+
 export async function sendTacticalChat(tickerId: number, content: string, files?: File[]): Promise<{ userMessage: ChatMsg; aiMessage: ChatMsg; fallback?: boolean }> {
   const formData = new FormData();
   formData.append("content", content);
@@ -437,6 +537,20 @@ export async function sendTacticalChat(tickerId: number, content: string, files?
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: "Tactical chat failed" }));
     throw new Error(err.message);
+  }
+  return res.json();
+}
+
+export interface DateCheckResult {
+  hasPlaybook: boolean;
+  hasChat: boolean;
+  hasExistingEntry: boolean;
+}
+
+export async function checkDateActivity(tickerId: number, date: string): Promise<DateCheckResult> {
+  const res = await fetch(`/api/diary/date-check/${tickerId}/${date}`, { credentials: "include" });
+  if (!res.ok) {
+    return { hasPlaybook: false, hasChat: false, hasExistingEntry: false };
   }
   return res.json();
 }

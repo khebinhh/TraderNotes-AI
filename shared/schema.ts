@@ -95,6 +95,33 @@ export const journalEntries = pgTable("journal_entries", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+export const uploadedImages = pgTable("uploaded_images", {
+  id: serial("id").primaryKey(),
+  userId: varchar("user_id").references(() => users.id, { onDelete: "cascade" }),
+  tickerId: integer("ticker_id").references(() => tickers.id, { onDelete: "cascade" }),
+  chatMessageId: integer("chat_message_id").references(() => chatMessages.id, { onDelete: "set null" }),
+  originalFilename: text("original_filename").notNull(),
+  storedPath: text("stored_path").notNull(),
+  mimeType: text("mime_type").notNull(),
+  uploadedAt: timestamp("uploaded_at").defaultNow(),
+});
+
+export const tradingDiary = pgTable("trading_diary", {
+  id: serial("id").primaryKey(),
+  userId: varchar("user_id").references(() => users.id, { onDelete: "cascade" }),
+  tickerId: integer("ticker_id").references(() => tickers.id, { onDelete: "cascade" }),
+  date: date("date").notNull(),
+  aiAnalysis: jsonb("ai_analysis"),
+  userClosingThought: text("user_closing_thought"),
+  isFinalized: boolean("is_finalized").notNull().default(false),
+  planAdherenceGrade: text("plan_adherence_grade"),
+  closingBias: text("closing_bias"),
+  dailyChartUrl: text("daily_chart_url"),
+  weeklyChartUrl: text("weekly_chart_url"),
+  monthlyChartUrl: text("monthly_chart_url"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const userWorkspaces = pgTable("user_workspaces", {
   id: serial("id").primaryKey(),
   userId: varchar("user_id").references(() => users.id, { onDelete: "cascade" }).unique(),
@@ -111,6 +138,8 @@ export const insertEventSchema = createInsertSchema(events).omit({ id: true });
 export const insertChatMessageSchema = createInsertSchema(chatMessages).omit({ id: true, createdAt: true });
 export const insertPlaybookSchema = createInsertSchema(playbooks).omit({ id: true, createdAt: true });
 export const insertJournalEntrySchema = createInsertSchema(journalEntries).omit({ id: true, createdAt: true });
+export const insertUploadedImageSchema = createInsertSchema(uploadedImages).omit({ id: true, uploadedAt: true });
+export const insertTradingDiarySchema = createInsertSchema(tradingDiary).omit({ id: true, createdAt: true });
 
 export type Ticker = typeof tickers.$inferSelect;
 export type InsertTicker = z.infer<typeof insertTickerSchema>;
@@ -130,4 +159,8 @@ export type Playbook = typeof playbooks.$inferSelect;
 export type InsertPlaybook = z.infer<typeof insertPlaybookSchema>;
 export type JournalEntry = typeof journalEntries.$inferSelect;
 export type InsertJournalEntry = z.infer<typeof insertJournalEntrySchema>;
+export type UploadedImage = typeof uploadedImages.$inferSelect;
+export type InsertUploadedImage = z.infer<typeof insertUploadedImageSchema>;
+export type TradingDiary = typeof tradingDiary.$inferSelect;
+export type InsertTradingDiary = z.infer<typeof insertTradingDiarySchema>;
 export type UserWorkspace = typeof userWorkspaces.$inferSelect;

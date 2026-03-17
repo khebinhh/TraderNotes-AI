@@ -15,7 +15,9 @@ replit.nix
 replit.md
 package-lock.json
 package.json
+.agents/
 
 # Attached assets
 attached_assets/
 client/public
+public/

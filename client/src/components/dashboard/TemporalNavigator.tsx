@@ -9,6 +9,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toggleChecklistItem, isFuturesSymbol, type NoteData, type FullNote, type TickerData, type PriceRatioData } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { motion } from "framer-motion";
 
 interface TemporalNavigatorProps {
   notes: NoteData[];
@@ -185,15 +186,20 @@ export function TemporalNavigator({ notes, activeNote, activeTicker, selectedNot
                         className="border-muted-foreground/50 data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground data-[state=checked]:border-primary"
                         data-testid={`checkbox-item-${item.id}`}
                       />
-                      <label
+                      <motion.label
                         htmlFor={`item-${item.id}`}
                         className={cn(
                           "text-xs font-medium leading-none pt-0.5 cursor-pointer",
-                          item.isCompleted ? "line-through text-muted-foreground" : "text-foreground"
+                          item.isCompleted ? "text-muted-foreground checklist-checked" : "text-foreground"
                         )}
+                        animate={{
+                          opacity: item.isCompleted ? 0.5 : 1,
+                          filter: item.isCompleted ? "saturate(0.3)" : "saturate(1)",
+                        }}
+                        transition={{ duration: 0.3 }}
                       >
                         {item.content}
-                      </label>
+                      </motion.label>
                     </div>
                   ))}
                   {activeNote.checklistItems.length === 0 && (

@@ -23,6 +23,7 @@ import { SidebarItem } from "./SidebarItem";
 import { getTopicName, type ChatSession } from "@/lib/sidebar-utils";
 import { PostMarketRecap } from "./PostMarketRecap";
 import { useToast } from "@/hooks/use-toast";
+import { motion } from "framer-motion";
 
 const ACCEPTED_FILE_TYPES = ".pdf,.png,.jpg,.jpeg,.csv";
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -913,7 +914,7 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
       <div className="flex-1 min-h-0 overflow-y-auto" style={{ scrollbarGutter: "stable" }}>
         <div className="p-1.5 space-y-0.5">
           {filteredPlaybooks.length > 0 ? (
-            filteredPlaybooks.map(pb => {
+            filteredPlaybooks.map((pb, idx) => {
               const pbDate = pb.targetDateStart || pb.date;
               const isTodays = todayPlaybookId === pb.id;
               return (
@@ -930,6 +931,7 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
                     isActive={activePlaybookId === pb.id}
                     onClick={() => handlePlaybookClick(pb)}
                     tickerSymbol={activeTicker?.symbol}
+                    index={idx}
                   />
                 </div>
               );
@@ -1049,7 +1051,17 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
             <ScrollArea className="flex-1" ref={scrollRef}>
               <div className="max-w-3xl mx-auto py-4 md:py-6 px-3 md:px-6 space-y-4 md:space-y-6">
                 {[...messages, ...optimisticMessages].map((msg) => (
-                  <div key={msg.id} className={cn("flex gap-2 md:gap-4", msg.role === "user" ? "justify-end" : "")} data-testid={`chat-message-${msg.id}`}>
+                  <motion.div
+                    key={msg.id}
+                    className={cn("flex gap-2 md:gap-4 gpu-accelerated", msg.role === "user" ? "justify-end" : "")}
+                    data-testid={`chat-message-${msg.id}`}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={msg.role === "user"
+                      ? { type: "spring", stiffness: 300, damping: 24 }
+                      : { duration: 0.3, ease: "easeOut" }
+                    }
+                  >
                     {msg.role === "assistant" && (
                       <Avatar className="h-8 w-8 border border-primary/20 shadow-[0_0_10px_-4px_rgba(245,158,11,0.3)] shrink-0 mt-1">
                         <AvatarFallback className="bg-gradient-to-br from-indigo-900 to-slate-900 text-primary">
@@ -1070,10 +1082,15 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
                         <AvatarFallback className="bg-muted text-muted-foreground text-xs">ME</AvatarFallback>
                       </Avatar>
                     )}
-                  </div>
+                  </motion.div>
                 ))}
                 {isAiLoading && (
-                  <div className="flex gap-4">
+                  <motion.div
+                    className="flex gap-4 gpu-accelerated"
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3, ease: "easeOut" }}
+                  >
                     <Avatar className="h-8 w-8 border border-primary/20 shrink-0">
                       <AvatarFallback className="bg-gradient-to-br from-indigo-900 to-slate-900 text-primary">
                         <Sparkles size={14} />
@@ -1095,15 +1112,22 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
                           </>
                         ) : (
                           <>
-                            <div className="w-2 h-2 bg-primary/40 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                            <div className="w-2 h-2 bg-primary/40 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                            <div className="w-2 h-2 bg-primary/40 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
-                            <span className="text-xs text-muted-foreground ml-2">Analyzing...</span>
+                            <motion.div className="w-2 h-2 bg-primary/40 rounded-full" animate={{ opacity: [0.3, 1, 0.3] }} transition={{ duration: 1.2, repeat: Infinity, delay: 0 }} />
+                            <motion.div className="w-2 h-2 bg-primary/40 rounded-full" animate={{ opacity: [0.3, 1, 0.3] }} transition={{ duration: 1.2, repeat: Infinity, delay: 0.2 }} />
+                            <motion.div className="w-2 h-2 bg-primary/40 rounded-full" animate={{ opacity: [0.3, 1, 0.3] }} transition={{ duration: 1.2, repeat: Infinity, delay: 0.4 }} />
+                            <motion.span
+                              className="text-xs text-muted-foreground ml-2"
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
+                              transition={{ duration: 0.5, delay: 0.3 }}
+                            >
+                              Analyzing...
+                            </motion.span>
                           </>
                         )}
                       </div>
                     </div>
-                  </div>
+                  </motion.div>
                 )}
                 {errorMessage && !isAiLoading && (() => {
                   const fallbackPlaybook = todayDailyPlaybook || (playbooksList.length > 0 ? playbooksList[0] : null);
@@ -1183,24 +1207,22 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
                       Or just type a question to chat with your AI trading mentor.
                     </p>
                     <div className="mt-6 grid grid-cols-2 gap-3 max-w-sm mx-auto px-2">
-                      <button
-                        onClick={() => fileInputRef.current?.click()}
-                        className="text-left p-4 rounded-xl bg-emerald-500/5 border border-emerald-500/20 hover:bg-emerald-500/10 transition-all group cursor-pointer"
+                      <div
+                        className="text-left p-4 rounded-xl bg-emerald-500/5 border border-emerald-500/20 group"
                         data-testid="button-upload-pdf"
                       >
-                        <FileText className="h-5 w-5 text-emerald-400 mb-2 group-hover:scale-110 transition-transform" />
+                        <FileText className="h-5 w-5 text-emerald-400 mb-2" />
                         <p className="text-xs font-bold text-emerald-400">Upload PDF/Doc</p>
-                        <p className="text-[10px] text-muted-foreground mt-0.5">PharmD, Izzy reports</p>
-                      </button>
-                      <button
-                        onClick={() => fileInputRef.current?.click()}
-                        className="text-left p-4 rounded-xl bg-blue-500/5 border border-blue-500/20 hover:bg-blue-500/10 transition-all group cursor-pointer"
+                        <p className="text-[10px] text-muted-foreground mt-0.5">Use the upload button below</p>
+                      </div>
+                      <div
+                        className="text-left p-4 rounded-xl bg-blue-500/5 border border-blue-500/20 group"
                         data-testid="button-upload-chart"
                       >
-                        <ImageIcon className="h-5 w-5 text-blue-400 mb-2 group-hover:scale-110 transition-transform" />
+                        <ImageIcon className="h-5 w-5 text-blue-400 mb-2" />
                         <p className="text-xs font-bold text-blue-400">Chart Screenshot</p>
-                        <p className="text-[10px] text-muted-foreground mt-0.5">AI reads chart levels</p>
-                      </button>
+                        <p className="text-[10px] text-muted-foreground mt-0.5">Use the upload button below</p>
+                      </div>
                     </div>
                   </div>
                 )}

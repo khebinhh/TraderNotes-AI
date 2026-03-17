@@ -1,9 +1,9 @@
-import { useState, useMemo, memo } from "react";
+import { useState, useMemo, memo, useRef } from "react";
 import {
   TrendingUp, TrendingDown, Minus, AlertTriangle, Calendar, CheckSquare,
   Square, ChevronDown, ChevronUp, Shield, Zap, Eye, MessageSquare, Save,
   Clock, Star, Filter, History, Users, Trash2, ChevronsUpDown, Layers,
-  Ruler, Timer, AlertOctagon, Target
+  Ruler, Timer, AlertOctagon, Target, Download
 } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   type PlaybookData, type Playbook, type PlaybookZoneLevel, type PlaybookScenario,
   type PlaybookEnhancedLevel, type PlaybookEnhancedScenario, type PlaybookMacroClock, type TacticalUpdate,
@@ -45,7 +46,7 @@ function biasColor(bias: string) {
 }
 
 function convictionColor(rating: string) {
-  if (rating === "A+" || rating === "A") return "border-amber-400/50 text-amber-300 bg-amber-500/10 shadow-[0_0_8px_-2px_rgba(251,191,36,0.3)]";
+  if (rating === "A+" || rating === "A") return "border-amber-400/50 text-amber-300 bg-amber-500/10 shadow-[0_0_8px_-2px_rgba(251,191,36,0.3)] conviction-glow";
   if (rating === "B+" || rating === "B") return "border-blue-400/50 text-blue-300 bg-blue-500/10";
   return "border-border text-muted-foreground bg-muted/20";
 }
@@ -190,21 +191,34 @@ function EnhancedZoneCard({ level, color, onAddToChart }: {
   const authorInitials = enhanced.author_initials;
 
   return (
-    <div
+    <motion.div
       className={cn(
-        "rounded-lg border p-3 transition-all cursor-pointer relative min-h-[44px]",
+        "rounded-lg border p-3 cursor-pointer relative min-h-[44px] gpu-accelerated",
         colorClasses[color],
         isConfluence && "ring-1 ring-amber-400/40 shadow-[0_0_12px_-3px_rgba(251,191,36,0.25)]"
       )}
       onClick={() => onAddToChart?.(level.price, level.label, chartColor[color])}
       data-testid={`zone-card-${color}-${level.price}`}
+      whileHover={{ scale: 1.02, borderColor: "rgba(255,255,255,0.15)" }}
+      transition={{ duration: 0.1 }}
     >
       {isConfluence && (
         <div className="absolute -top-2 -right-2 z-10" data-testid="confluence-badge">
-          <span className="inline-flex items-center gap-1 text-[7px] font-bold font-mono uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-400/50 shadow-[0_0_8px_-2px_rgba(251,191,36,0.4)]" title={enhanced.sources ? `Multiple experts identified this area. Sources: ${enhanced.sources.join(", ")}` : "Confluence zone"}>
+          <motion.span
+            className="inline-flex items-center gap-1 text-[7px] font-bold font-mono uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-400/50 shadow-[0_0_8px_-2px_rgba(251,191,36,0.4)] gpu-accelerated"
+            title={enhanced.sources ? `Multiple experts identified this area. Sources: ${enhanced.sources.join(", ")}` : "Confluence zone"}
+            animate={{
+              boxShadow: [
+                "0 0 8px -2px rgba(251,191,36,0.4)",
+                "0 0 16px -2px rgba(251,191,36,0.6)",
+                "0 0 8px -2px rgba(251,191,36,0.4)",
+              ],
+            }}
+            transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+          >
             <Layers className="h-2.5 w-2.5" />
             CONFLUENCE
-          </span>
+          </motion.span>
         </div>
       )}
       <div className="flex items-center justify-between mb-1.5">
@@ -248,7 +262,7 @@ function EnhancedZoneCard({ level, color, onAddToChart }: {
           <AuthorInitialsDot initials={authorInitials} />
         )}
       </div>
-    </div>
+    </motion.div>
   );
 }
 
@@ -304,18 +318,26 @@ function EnhancedScenarioRow({ scenario, checked, onToggle }: {
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 mb-1 flex-wrap">
           {zoneIcon[scenario.zone]}
-          <span className={cn("text-xs font-bold", checked && "line-through")}>
+          <motion.span
+            className={cn("text-xs font-bold", checked && "checklist-checked")}
+            animate={{ opacity: checked ? 0.5 : 1, filter: checked ? "saturate(0.3)" : "saturate(1)" }}
+            transition={{ duration: 0.3 }}
+          >
             {condition}
-          </span>
+          </motion.span>
           {rating && (
             <span className={cn("text-[8px] font-mono px-1.5 py-0.5 rounded border", convictionColor(rating))}>
               {rating}
             </span>
           )}
         </div>
-        <p className={cn("text-xs text-muted-foreground", checked && "line-through")}>
+        <motion.p
+          className={cn("text-xs text-muted-foreground", checked && "checklist-checked")}
+          animate={{ opacity: checked ? 0.5 : 1, filter: checked ? "saturate(0.3)" : "saturate(1)" }}
+          transition={{ duration: 0.3 }}
+        >
           → {outcome}
-        </p>
+        </motion.p>
         {crossFilter && (
           <div className="flex items-center gap-1.5 mt-1.5 px-2 py-1 rounded bg-orange-500/10 border border-orange-500/20" data-testid="cross-market-filter">
             <Filter className="h-3 w-3 text-orange-400" />
@@ -379,7 +401,11 @@ function CollapsibleSection({ title, icon, count, isOpen, onToggle, children, co
   testId?: string;
 }) {
   return (
-    <div className="rounded-xl border border-border bg-card/30 overflow-hidden" data-testid={testId}>
+    <motion.div
+      className="rounded-xl border border-border bg-card/30 overflow-hidden gpu-accelerated"
+      data-testid={testId}
+      layout
+    >
       <button
         onClick={onToggle}
         className="w-full flex items-center justify-between p-4 hover:bg-muted/30 transition-colors min-h-[44px]"
@@ -394,13 +420,51 @@ function CollapsibleSection({ title, icon, count, isOpen, onToggle, children, co
             </Badge>
           )}
         </div>
-        {isOpen ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+        <motion.div
+          animate={{ rotate: isOpen ? 180 : 0 }}
+          transition={{ duration: 0.2 }}
+        >
+          <ChevronDown className="h-4 w-4 text-muted-foreground" />
+        </motion.div>
       </button>
-      <div className={cn("px-4 pb-4", !isOpen && "hidden")}>
-        {children}
-      </div>
-    </div>
+      <AnimatePresence initial={false}>
+        {isOpen && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.25, ease: "easeOut" }}
+            className="gpu-accelerated"
+            style={{ overflow: "hidden" }}
+          >
+            <div className="px-4 pb-4">
+              {children}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
   );
+}
+
+async function generatePdf(element: HTMLElement, title: string) {
+  const { default: jsPDF } = await import("jspdf");
+  const { default: html2canvas } = await import("html2canvas");
+  const images = Array.from(element.querySelectorAll("img"));
+  await Promise.all(images.map((img) => img.complete ? Promise.resolve() : img.decode().catch(() => {})));
+  const canvas = await html2canvas(element, { backgroundColor: "#0a0a0f", scale: 2, useCORS: true, allowTaint: false, logging: false });
+  const imgData = canvas.toDataURL("image/png");
+  const pdf = new jsPDF({ orientation: canvas.width > canvas.height ? "landscape" : "portrait", unit: "px", format: [canvas.width, canvas.height] });
+  pdf.addImage(imgData, "PNG", 0, 0, canvas.width, canvas.height);
+  const blob = pdf.output("blob");
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${title}.pdf`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export const PlaybookDashboard = memo(function PlaybookDashboard({ playbook, activeTickerSymbol, onSaveReview, onAddToChart, onDelete, isSavingReview, isDeleting }: PlaybookDashboardProps) {
@@ -411,6 +475,7 @@ export const PlaybookDashboard = memo(function PlaybookDashboard({ playbook, act
   const [showReview, setShowReview] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showOnlyConfluence, setShowOnlyConfluence] = useState(false);
+  const reportRef = useRef<HTMLDivElement>(null);
 
   const [sectionState, setSectionState] = useState<Record<string, boolean>>(() => {
     return {
@@ -539,7 +604,7 @@ export const PlaybookDashboard = memo(function PlaybookDashboard({ playbook, act
 
   return (
     <ScrollArea className="h-full">
-      <div className={cn("max-w-4xl mx-auto space-y-6", isMobile ? "p-3" : "p-6")}>
+      <div ref={reportRef} className={cn("max-w-4xl mx-auto space-y-6", isMobile ? "p-3" : "p-6")}>
 
         <div className={cn(
           "rounded-xl border",
@@ -982,6 +1047,22 @@ export const PlaybookDashboard = memo(function PlaybookDashboard({ playbook, act
             </Button>
           </div>
         )}
+
+        <div className="flex justify-center pt-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={async () => {
+              if (!reportRef.current) return;
+              try { await generatePdf(reportRef.current, `playbook-${playbook.id}`); } catch {}
+            }}
+            className="font-mono text-xs tracking-wide border-muted-foreground/30 text-muted-foreground hover:text-foreground"
+            data-testid="button-download-playbook-pdf"
+          >
+            <Download className="h-3.5 w-3.5 mr-1.5 shrink-0" />
+            DOWNLOAD AS PDF
+          </Button>
+        </div>
 
         {onDelete && (
           <div className="mt-8 border border-red-500/20 rounded-lg bg-red-500/5 p-4" data-testid="section-danger-zone">

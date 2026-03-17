@@ -16,6 +16,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { motion } from "framer-motion";
 
 interface PlaybookFallbackData {
   date: string;
@@ -253,10 +254,16 @@ const TacticalChatPanel = memo(function TacticalChatPanel({ activeTicker, messag
             </div>
           )}
           {tacticalMessages.map((msg) => (
-            <div
+            <motion.div
               key={msg.id}
-              className={cn("text-xs leading-relaxed", msg.role === "user" ? "text-right" : "")}
+              className={cn("text-xs leading-relaxed gpu-accelerated", msg.role === "user" ? "text-right" : "")}
               data-testid={`tactical-msg-${msg.id}`}
+              initial={{ opacity: 0, y: 15 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={msg.role === "user"
+                ? { type: "spring", stiffness: 300, damping: 24 }
+                : { duration: 0.3, ease: "easeOut" }
+              }
             >
               <div className={cn(
                 "inline-block rounded-lg px-3 py-2 max-w-[95%]",
@@ -275,10 +282,15 @@ const TacticalChatPanel = memo(function TacticalChatPanel({ activeTicker, messag
                   {new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                 </div>
               )}
-            </div>
+            </motion.div>
           ))}
           {isAiLoading && (
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <motion.div
+              className="flex items-center gap-2 text-xs text-muted-foreground gpu-accelerated"
+              initial={{ opacity: 0, y: 15 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.3, ease: "easeOut" }}
+            >
               <div className="inline-block rounded-lg px-3 py-2 bg-muted/50 border border-border">
                 <div className="flex items-center gap-1.5">
                   {isRetrying ? (
@@ -288,15 +300,22 @@ const TacticalChatPanel = memo(function TacticalChatPanel({ activeTicker, messag
                     </>
                   ) : (
                     <>
-                      <div className="w-1.5 h-1.5 bg-primary/50 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                      <div className="w-1.5 h-1.5 bg-primary/50 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                      <div className="w-1.5 h-1.5 bg-primary/50 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
-                      <span className="text-[10px] text-muted-foreground ml-1">Analyzing...</span>
+                      <motion.div className="w-1.5 h-1.5 bg-primary/50 rounded-full" animate={{ opacity: [0.3, 1, 0.3] }} transition={{ duration: 1.2, repeat: Infinity, delay: 0 }} />
+                      <motion.div className="w-1.5 h-1.5 bg-primary/50 rounded-full" animate={{ opacity: [0.3, 1, 0.3] }} transition={{ duration: 1.2, repeat: Infinity, delay: 0.2 }} />
+                      <motion.div className="w-1.5 h-1.5 bg-primary/50 rounded-full" animate={{ opacity: [0.3, 1, 0.3] }} transition={{ duration: 1.2, repeat: Infinity, delay: 0.4 }} />
+                      <motion.span
+                        className="text-[10px] text-muted-foreground ml-1"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        transition={{ duration: 0.5, delay: 0.3 }}
+                      >
+                        Analyzing...
+                      </motion.span>
                     </>
                   )}
                 </div>
               </div>
-            </div>
+            </motion.div>
           )}
           {errorMessage && !isAiLoading && (() => {
             const nyNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));

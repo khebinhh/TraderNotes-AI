@@ -1,7 +1,7 @@
 import { eq, desc, and, gte, lte, or, sql } from "drizzle-orm";
 import { db } from "./db";
 import {
-  tickers, notes, calculatedLevels, dailyChecklists, checklistItems, events, chatMessages, playbooks, journalEntries, userWorkspaces,
+  tickers, notes, calculatedLevels, dailyChecklists, checklistItems, events, chatMessages, playbooks, journalEntries, uploadedImages, tradingDiary, userWorkspaces,
   type Ticker, type InsertTicker,
   type Note, type InsertNote,
   type CalculatedLevel, type InsertCalculatedLevel,
@@ -11,6 +11,8 @@ import {
   type ChatMessage, type InsertChatMessage,
   type Playbook, type InsertPlaybook,
   type JournalEntry, type InsertJournalEntry,
+  type UploadedImage, type InsertUploadedImage,
+  type TradingDiary, type InsertTradingDiary,
   type UserWorkspace,
 } from "@shared/schema";
 
@@ -63,6 +65,16 @@ export interface IStorage {
   getJournalEntries(tickerId: number, userId: string): Promise<JournalEntry[]>;
   createJournalEntry(entry: InsertJournalEntry): Promise<JournalEntry>;
   deleteJournalEntry(id: number, userId: string): Promise<void>;
+
+  createUploadedImage(image: InsertUploadedImage): Promise<UploadedImage>;
+  getUploadedImagesByTicker(tickerId: number, userId: string): Promise<UploadedImage[]>;
+  getUploadedImagesByDate(tickerId: number, userId: string, date: string): Promise<UploadedImage[]>;
+
+  getDiaryEntries(tickerId: number, userId: string): Promise<TradingDiary[]>;
+  getDiaryEntry(id: number, userId: string): Promise<TradingDiary | undefined>;
+  getDiaryByDate(tickerId: number, userId: string, date: string): Promise<TradingDiary | undefined>;
+  createDiary(diary: InsertTradingDiary): Promise<TradingDiary>;
+  updateDiary(id: number, userId: string, data: Partial<InsertTradingDiary>): Promise<TradingDiary | undefined>;
 
   getWorkspace(userId: string): Promise<UserWorkspace | undefined>;
   saveWorkspace(userId: string, activeTickers: number[], lastActiveTicker: number | null): Promise<UserWorkspace>;
@@ -335,6 +347,60 @@ export class DatabaseStorage implements IStorage {
 
   async deleteJournalEntry(id: number, userId: string): Promise<void> {
     await db.delete(journalEntries).where(and(eq(journalEntries.id, id), eq(journalEntries.userId, userId)));
+  }
+
+  async createUploadedImage(image: InsertUploadedImage): Promise<UploadedImage> {
+    const [created] = await db.insert(uploadedImages).values(image).returning();
+    return created;
+  }
+
+  async getUploadedImagesByTicker(tickerId: number, userId: string): Promise<UploadedImage[]> {
+    return db.select().from(uploadedImages)
+      .where(and(eq(uploadedImages.tickerId, tickerId), eq(uploadedImages.userId, userId)))
+      .orderBy(desc(uploadedImages.uploadedAt));
+  }
+
+  async getUploadedImagesByDate(tickerId: number, userId: string, date: string): Promise<UploadedImage[]> {
+    const allImages = await db.select().from(uploadedImages)
+      .where(and(eq(uploadedImages.tickerId, tickerId), eq(uploadedImages.userId, userId)))
+      .orderBy(uploadedImages.uploadedAt);
+    return allImages.filter(img => {
+      if (!img.uploadedAt) return false;
+      const imgNY = new Date(new Date(img.uploadedAt).toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const imgDateStr = `${imgNY.getFullYear()}-${String(imgNY.getMonth() + 1).padStart(2, "0")}-${String(imgNY.getDate()).padStart(2, "0")}`;
+      return imgDateStr === date;
+    });
+  }
+
+  async getDiaryEntries(tickerId: number, userId: string): Promise<TradingDiary[]> {
+    return db.select().from(tradingDiary)
+      .where(and(eq(tradingDiary.tickerId, tickerId), eq(tradingDiary.userId, userId)))
+      .orderBy(desc(tradingDiary.date));
+  }
+
+  async getDiaryEntry(id: number, userId: string): Promise<TradingDiary | undefined> {
+    const [entry] = await db.select().from(tradingDiary)
+      .where(and(eq(tradingDiary.id, id), eq(tradingDiary.userId, userId)));
+    return entry;
+  }
+
+  async getDiaryByDate(tickerId: number, userId: string, date: string): Promise<TradingDiary | undefined> {
+    const [entry] = await db.select().from(tradingDiary)
+      .where(and(eq(tradingDiary.tickerId, tickerId), eq(tradingDiary.userId, userId), eq(tradingDiary.date, date)));
+    return entry;
+  }
+
+  async createDiary(diary: InsertTradingDiary): Promise<TradingDiary> {
+    const [created] = await db.insert(tradingDiary).values(diary).returning();
+    return created;
+  }
+
+  async updateDiary(id: number, userId: string, data: Partial<InsertTradingDiary>): Promise<TradingDiary | undefined> {
+    const [updated] = await db.update(tradingDiary)
+      .set(data)
+      .where(and(eq(tradingDiary.id, id), eq(tradingDiary.userId, userId)))
+      .returning();
+    return updated;
   }
 
   async getWorkspace(userId: string): Promise<UserWorkspace | undefined> {

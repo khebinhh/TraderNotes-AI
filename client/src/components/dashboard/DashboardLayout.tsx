@@ -3,21 +3,23 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { TickerTabs, EmptyWorkspace, getTickerColor, inferExchange } from "./TickerTabs";
 import { StrategyRoom } from "./StrategyRoom";
 import { ActionDashboard, type ActionDashboardHandle } from "./ActionDashboard";
+import { DiaryView } from "./DiaryView";
 import {
   fetchTickers, fetchNotesByTicker, fetchFullNote, fetchPriceRatio, seedData,
   isFuturesSymbol, createTicker, deleteTicker, fetchWorkspace, saveWorkspace,
   type TickerData, type NoteData, type FullNote, type PriceRatioData
 } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
-import { LogOut, BookOpen, BarChart3, Menu } from "lucide-react";
+import { LogOut, BookOpen, BarChart3, CalendarDays, Menu } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription, SheetTrigger,
 } from "@/components/ui/sheet";
+import { motion, AnimatePresence } from "framer-motion";
 
-type RoomMode = "strategy" | "action";
+type RoomMode = "strategy" | "action" | "diary";
 
 export function DashboardLayout() {
   const { user, logout } = useAuth();
@@ -211,7 +213,7 @@ export function DashboardLayout() {
 
   return (
     <div className="h-screen w-full bg-background text-foreground overflow-hidden flex flex-col">
-      <header className="h-11 border-b border-border bg-card flex items-center px-2 sm:px-4 justify-between shrink-0 z-10">
+      <header className="h-11 border-b border-border bg-card flex items-center px-2 sm:px-4 pr-16 sm:pr-20 justify-between shrink-0 z-10">
         <div className="flex items-center gap-2 sm:gap-4 min-w-0">
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <div className="h-4 w-4 bg-primary rounded-sm animate-pulse" />
@@ -247,10 +249,23 @@ export function DashboardLayout() {
               <BarChart3 className="h-3 w-3" />
               <span className="hidden sm:inline">Action Dashboard</span>
             </button>
+            <button
+              onClick={() => setRoomMode("diary")}
+              data-testid="button-diary"
+              className={cn(
+                "flex items-center gap-1.5 px-2 sm:px-3 py-1 rounded-md text-xs font-mono font-bold tracking-wide transition-all",
+                roomMode === "diary"
+                  ? "bg-primary text-primary-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              <CalendarDays className="h-3 w-3" />
+              <span className="hidden sm:inline">Diary</span>
+            </button>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 sm:gap-4 text-xs font-mono text-muted-foreground shrink-0">
+        <div className="flex items-center gap-2 sm:gap-4 text-xs font-mono text-muted-foreground shrink-0 ml-auto">
           <div className="flex items-center gap-1">
             <span className="w-2 h-2 rounded-full bg-green-500" />
             <span className="hidden sm:inline" data-testid="status-system">ONLINE</span>
@@ -343,38 +358,78 @@ export function DashboardLayout() {
       />
 
       <div className="flex-1 overflow-hidden">
-        {showEmptyWorkspace ? (
-          <EmptyWorkspace onAddTicker={handleAddTicker} />
-        ) : roomMode === "strategy" ? (
-          <StrategyRoom
-            activeTicker={activeTicker}
-            activeNote={activeNote || null}
-            notes={notes}
-            selectedNoteId={selectedNoteId}
-            onSelectNote={setSelectedNoteId}
-            onAddToChart={(price, label, color) => {
-              pendingLevelRef.current = { price, label, color };
-              setRoomMode("action");
-              toast({
-                title: "Level added to chart",
-                description: `${label} at ${price}`,
-              });
-            }}
-            onAddTicker={handleAddTicker}
-          />
-        ) : (
-          <ActionDashboard
-            ref={actionDashboardRef}
-            activeTicker={activeTicker}
-            activeNote={activeNote || null}
-            notes={notes}
-            selectedNoteId={selectedNoteId}
-            onSelectNote={setSelectedNoteId}
-            priceRatio={priceRatio || null}
-            pendingLevel={pendingLevelRef.current}
-            onPendingLevelConsumed={() => { pendingLevelRef.current = null; }}
-          />
-        )}
+        <AnimatePresence mode="wait">
+          {showEmptyWorkspace ? (
+            <motion.div
+              key="empty"
+              initial={{ opacity: 0, scale: 0.98 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.98 }}
+              transition={{ duration: 0.3, ease: "easeOut" }}
+              className="h-full gpu-accelerated"
+            >
+              <EmptyWorkspace onAddTicker={handleAddTicker} />
+            </motion.div>
+          ) : roomMode === "strategy" ? (
+            <motion.div
+              key="strategy"
+              initial={{ opacity: 0, scale: 0.98 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.98 }}
+              transition={{ duration: 0.3, ease: "easeOut" }}
+              className="h-full gpu-accelerated"
+            >
+              <StrategyRoom
+                activeTicker={activeTicker}
+                activeNote={activeNote || null}
+                notes={notes}
+                selectedNoteId={selectedNoteId}
+                onSelectNote={setSelectedNoteId}
+                onAddToChart={(price, label, color) => {
+                  pendingLevelRef.current = { price, label, color };
+                  setRoomMode("action");
+                  toast({
+                    title: "Level added to chart",
+                    description: `${label} at ${price}`,
+                  });
+                }}
+                onAddTicker={handleAddTicker}
+              />
+            </motion.div>
+          ) : roomMode === "action" ? (
+            <motion.div
+              key="action"
+              initial={{ opacity: 0, scale: 0.98 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.98 }}
+              transition={{ duration: 0.3, ease: "easeOut" }}
+              className="h-full gpu-accelerated"
+            >
+              <ActionDashboard
+                ref={actionDashboardRef}
+                activeTicker={activeTicker}
+                activeNote={activeNote || null}
+                notes={notes}
+                selectedNoteId={selectedNoteId}
+                onSelectNote={setSelectedNoteId}
+                priceRatio={priceRatio || null}
+                pendingLevel={pendingLevelRef.current}
+                onPendingLevelConsumed={() => { pendingLevelRef.current = null; }}
+              />
+            </motion.div>
+          ) : (
+            <motion.div
+              key="diary"
+              initial={{ opacity: 0, scale: 0.98 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.98 }}
+              transition={{ duration: 0.3, ease: "easeOut" }}
+              className="h-full gpu-accelerated"
+            >
+              <DiaryView activeTicker={activeTicker} />
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
     </div>
   );

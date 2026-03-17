@@ -1,6 +1,9 @@
 import type { Express, Response } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import { db } from "./db";
+import { uploadedImages, tradingDiary } from "@shared/schema";
+import { eq, and, or } from "drizzle-orm";
 import { isAuthenticated } from "./auth";
 import { getLiveRatio, isFuturesSymbol, getFuturesMapping } from "./priceService";
 import { getMarketDate } from "./market-date";
@@ -13,6 +16,7 @@ import {
   insertChatMessageSchema,
   insertTickerSchema,
   insertJournalEntrySchema,
+  insertTradingDiarySchema,
 } from "@shared/schema";
 import { z } from "zod";
 import multer from "multer";
@@ -355,6 +359,29 @@ export async function registerRoutes(
         content: content + (uploadedFiles.length > 0 ? ` [${uploadedFiles.length} file${uploadedFiles.length > 1 ? "s" : ""}: ${fileNames}]` : ""),
       });
 
+      for (const uf of uploadedFiles) {
+        const mime = inferMimeType(uf.originalname, uf.mimetype);
+        if (mime.startsWith("image/")) {
+          try {
+            const uploadsDir = path.join(process.cwd(), "public", "uploads");
+            if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+            const destName = `${Date.now()}-${Math.random().toString(36).slice(2)}${path.extname(uf.originalname)}`;
+            const destPath = path.join(uploadsDir, destName);
+            fs.copyFileSync(uf.path, destPath);
+            await storage.createUploadedImage({
+              userId,
+              tickerId,
+              chatMessageId: userMessage.id,
+              originalFilename: uf.originalname,
+              storedPath: `/uploads/${destName}`,
+              mimeType: mime,
+            });
+          } catch (imgErr) {
+            console.error("Image persistence error (non-fatal):", imgErr);
+          }
+        }
+      }
+
       const tickerNotes = await storage.getNotesByTicker(tickerId, userId);
       const latestNote = tickerNotes[0];
       let contextInfo = `Ticker: ${ticker.symbol} (${ticker.displayName})\n`;
@@ -658,8 +685,11 @@ Format the suggestion as: [SYNC_SUGGEST: SYMBOL] — e.g., "I notice this docume
 
 Only suggest tickers that are NOT "${ticker.symbol}" (the current workspace).`;
 
-      const model = genAI.getGenerativeModel({
-        model: "gemini-2.5-flash",
+      const CHAT_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"];
+      let chatModelIndex = 0;
+      let chatModelName = CHAT_MODELS[0];
+      let model = genAI.getGenerativeModel({
+        model: chatModelName,
         systemInstruction,
         generationConfig: {
           temperature: 0.1,
@@ -743,14 +773,15 @@ Only suggest tickers that are NOT "${ticker.symbol}" (the current workspace).`;
 
       parts.push({ text: content || "Analyze the attached file in full detail. Provide a complete thesis, all levels, If/Then scenarios, and execution checklist." });
 
-      let aiContent: string;
+      let aiContent: string = "";
       let rawAiContent: string = "";
       let extractedGamePlan: any = null;
       let tacticalBriefing: any = null;
       let isFallback = false;
 
-      const MAX_CHAT_RETRIES = 3;
+      const MAX_CHAT_RETRIES = 4;
       let lastAiErr: any = null;
+      let chatRetryModelAttempts = 0;
       for (let attempt = 0; attempt < MAX_CHAT_RETRIES; attempt++) {
         try {
           const chat = model.startChat({
@@ -782,11 +813,27 @@ Only suggest tickers that are NOT "${ticker.symbol}" (the current workspace).`;
           lastAiErr = aiErr;
           const status = aiErr?.status || aiErr?.httpStatusCode || aiErr?.code;
           const isRetryable = status === 503 || status === 429 || String(aiErr?.message || "").includes("503") || String(aiErr?.message || "").includes("429") || String(aiErr?.message || "").includes("Service Unavailable") || String(aiErr?.message || "").includes("overloaded");
-          if (isRetryable && attempt < MAX_CHAT_RETRIES - 1) {
-            const delay = Math.pow(2, attempt) * 1000;
-            console.log(`Chat API error (${status || "unknown"}). Retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_CHAT_RETRIES})...`);
-            await new Promise(r => setTimeout(r, delay));
-            continue;
+          if (isRetryable) {
+            chatRetryModelAttempts++;
+            if (chatRetryModelAttempts >= 2 && chatModelIndex < CHAT_MODELS.length - 1) {
+              chatModelIndex++;
+              chatModelName = CHAT_MODELS[chatModelIndex];
+              chatRetryModelAttempts = 0;
+              console.log(`Chat: switching to fallback model ${chatModelName}`);
+              model = genAI.getGenerativeModel({
+                model: chatModelName,
+                systemInstruction,
+                generationConfig: { temperature: 0.1, maxOutputTokens: 16384 },
+              });
+              await new Promise(r => setTimeout(r, 2000));
+              continue;
+            }
+            if (attempt < MAX_CHAT_RETRIES - 1) {
+              const delay = Math.pow(2, attempt) * 1000;
+              console.log(`Chat API error (${status || "unknown"}, model=${chatModelName}). Retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_CHAT_RETRIES})...`);
+              await new Promise(r => setTimeout(r, delay));
+              continue;
+            }
           }
           break;
         }
@@ -1469,8 +1516,10 @@ Do NOT conflate these two concepts. If a document mentions BOTH "30-34 point con
 9. NEVER fabricate geopolitical events — only include what is explicitly written in the document
 10. Keep Point Reductions and Control Ratios as SEPARATE strategy_rules entries`;
 
-      const model = genAI.getGenerativeModel({
-        model: "gemini-2.5-pro",
+      const PLAYBOOK_MODELS = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"];
+      let activeModelName = PLAYBOOK_MODELS[0];
+      let model = genAI.getGenerativeModel({
+        model: activeModelName,
         systemInstruction: playbookSystemPrompt,
         generationConfig: {
           temperature: 0.1,
@@ -1622,19 +1671,23 @@ Do NOT conflate these two concepts. If a document mentions BOTH "30-34 point con
 
       let rawText = "";
       let playbookData: any = null;
-      const MAX_RETRIES = 3;
+      let modelAttemptIndex = 0;
+      let totalAttempts = 0;
+      const MAX_ATTEMPTS_PER_MODEL = 2;
+      const MAX_TOTAL_ATTEMPTS = PLAYBOOK_MODELS.length * MAX_ATTEMPTS_PER_MODEL;
+      let modelAttemptsInCurrent = 0;
 
-      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      for (totalAttempts = 1; totalAttempts <= MAX_TOTAL_ATTEMPTS; totalAttempts++) {
         try {
           const result = await model.generateContent({ contents: [{ role: "user", parts }] });
           const finishReason = result.response.candidates?.[0]?.finishReason;
           rawText = result.response.text();
-          console.log(`---- RAW AI RESPONSE START (attempt ${attempt}, finishReason=${finishReason}) ----`);
+          console.log(`---- RAW AI RESPONSE START (model=${activeModelName}, attempt ${totalAttempts}, finishReason=${finishReason}) ----`);
           console.log(rawText.slice(0, 500));
           console.log(`---- RAW AI RESPONSE END (${rawText.length} chars) ----`);
 
           if (finishReason === "MAX_TOKENS") {
-            console.warn(`Response truncated by token limit on attempt ${attempt}. Attempting repair...`);
+            console.warn(`Response truncated by token limit on attempt ${totalAttempts}. Attempting repair...`);
             playbookData = repairTruncatedJSON(rawText);
             if (playbookData) {
               console.log("Truncated response repaired successfully.");
@@ -1654,24 +1707,45 @@ Do NOT conflate these two concepts. If a document mentions BOTH "30-34 point con
             }
           }
 
-          console.error(`JSON Parse Error Location: attempt ${attempt}, finishReason=${finishReason}, raw length=${rawText.length}, first 200 chars: ${rawText.slice(0, 200)}`);
+          console.error(`JSON Parse Error Location: model=${activeModelName}, attempt ${totalAttempts}, finishReason=${finishReason}, raw length=${rawText.length}, first 200 chars: ${rawText.slice(0, 200)}`);
 
-          if (attempt < MAX_RETRIES) {
-            const delay = Math.pow(2, attempt) * 1000;
+          if (totalAttempts < MAX_TOTAL_ATTEMPTS) {
+            const delay = Math.pow(2, modelAttemptsInCurrent) * 1000;
             console.log(`Retrying in ${delay}ms...`);
             await new Promise(r => setTimeout(r, delay));
+            modelAttemptsInCurrent++;
           }
         } catch (apiErr: any) {
           const status = apiErr?.status || apiErr?.httpStatusCode;
-          console.error(`Gemini API error (attempt ${attempt}):`, apiErr?.message || apiErr);
-          if ((status === 429 || status === 503) && attempt < MAX_RETRIES) {
-            const delay = Math.pow(2, attempt) * 1000;
-            console.log(`Rate limited/overloaded (${status}). Retrying in ${delay}ms...`);
-            await new Promise(r => setTimeout(r, delay));
-            continue;
+          const errMsg = String(apiErr?.message || "");
+          const isOverloaded = status === 503 || status === 429 || errMsg.includes("503") || errMsg.includes("429") || errMsg.includes("Service Unavailable") || errMsg.includes("overloaded");
+          console.error(`Gemini API error (model=${activeModelName}, attempt ${totalAttempts}):`, apiErr?.message || apiErr);
+
+          if (isOverloaded) {
+            modelAttemptsInCurrent++;
+            if (modelAttemptsInCurrent >= MAX_ATTEMPTS_PER_MODEL && modelAttemptIndex < PLAYBOOK_MODELS.length - 1) {
+              modelAttemptIndex++;
+              activeModelName = PLAYBOOK_MODELS[modelAttemptIndex];
+              modelAttemptsInCurrent = 0;
+              console.log(`Switching to fallback model: ${activeModelName}`);
+              model = genAI.getGenerativeModel({
+                model: activeModelName,
+                systemInstruction: playbookSystemPrompt,
+                generationConfig: { temperature: 0.1, maxOutputTokens: 65536, responseMimeType: "application/json" },
+              });
+              await new Promise(r => setTimeout(r, 2000));
+              continue;
+            }
+            if (totalAttempts < MAX_TOTAL_ATTEMPTS) {
+              const delay = Math.pow(2, modelAttemptsInCurrent) * 1000;
+              console.log(`Rate limited/overloaded (${status}). Retrying ${activeModelName} in ${delay}ms...`);
+              await new Promise(r => setTimeout(r, delay));
+              continue;
+            }
           }
-          if (attempt >= MAX_RETRIES) {
-            await storage.createChatMessage({ userId, tickerId, role: "assistant", content: `⚠️ **AI Service Busy**\n\nThe AI service is currently experiencing high traffic and couldn't process "${originalFilename}". This is temporary.\n\n**Try:** Use the retry button below to resubmit, or wait a minute and upload again.` });
+
+          if (totalAttempts >= MAX_TOTAL_ATTEMPTS) {
+            await storage.createChatMessage({ userId, tickerId, role: "assistant", content: `⚠️ **AI Service Busy**\n\nThe AI service is currently experiencing high traffic and couldn't process "${originalFilename}". This is temporary.\n\n**Try:** Use the retry button below to resubmit, or wait a minute and upload again.\n\n_Attempted models: ${PLAYBOOK_MODELS.slice(0, modelAttemptIndex + 1).join(" → ")}_` });
             return res.status(503).json({ message: "AI service is currently busy. Please try again in a moment." });
           }
         }
@@ -2353,8 +2427,11 @@ Keep responses concise and actionable for a live trading session:
 
 ${playbookContext}`;
 
-      const model = genAI.getGenerativeModel({
-        model: "gemini-2.5-flash",
+      const TACTICAL_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"];
+      let tactModelIdx = 0;
+      let tactModelName = TACTICAL_MODELS[0];
+      let model = genAI.getGenerativeModel({
+        model: tactModelName,
         systemInstruction: tacticalPrompt,
         generationConfig: {
           temperature: 0.1,
@@ -2407,21 +2484,46 @@ ${playbookContext}`;
             parts.push(result.value.data);
           }
         }
-        for (const path of tempFilePaths) {
-          try { fs.unlinkSync(path); } catch {}
-        }
       }
 
       const fileNames = uploadedFiles.map(f => f.originalname).join(", ");
       parts.push({ text: content || "Analyze this chart screenshot. What price am I at and what does the playbook say?" });
 
-      await storage.createChatMessage({ userId, tickerId, role: "user", content: content || (uploadedFiles.length > 0 ? `[${uploadedFiles.length} file${uploadedFiles.length > 1 ? "s" : ""}: ${fileNames}]` : "[Chart Screenshot uploaded]") });
+      const tacticalUserMsg = await storage.createChatMessage({ userId, tickerId, role: "user", content: content || (uploadedFiles.length > 0 ? `[${uploadedFiles.length} file${uploadedFiles.length > 1 ? "s" : ""}: ${fileNames}]` : "[Chart Screenshot uploaded]") });
+
+      for (const uf of uploadedFiles) {
+        const ufMime = inferMimeType(uf.originalname, uf.mimetype);
+        if (ufMime.startsWith("image/")) {
+          try {
+            const uploadsDir = path.join(process.cwd(), "public", "uploads");
+            if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+            const destName = `${Date.now()}-${Math.random().toString(36).slice(2)}${path.extname(uf.originalname)}`;
+            const destPath = path.join(uploadsDir, destName);
+            fs.copyFileSync(uf.path, destPath);
+            await storage.createUploadedImage({
+              userId,
+              tickerId,
+              chatMessageId: tacticalUserMsg.id,
+              originalFilename: uf.originalname,
+              storedPath: `/uploads/${destName}`,
+              mimeType: ufMime,
+            });
+          } catch (imgErr) {
+            console.error("Image persistence error (non-fatal):", imgErr);
+          }
+        }
+      }
+
+      for (const tmpPath of tempFilePaths) {
+        try { fs.unlinkSync(tmpPath); } catch {}
+      }
 
       let aiText: string;
       let isFallback = false;
 
-      const MAX_TACTICAL_RETRIES = 3;
+      const MAX_TACTICAL_RETRIES = 4;
       let lastTacticalErr: any = null;
+      let tactRetryModelAttempts = 0;
       for (let attempt = 0; attempt < MAX_TACTICAL_RETRIES; attempt++) {
         try {
           const result = await model.generateContent({ contents: [{ role: "user", parts }] });
@@ -2432,11 +2534,27 @@ ${playbookContext}`;
           lastTacticalErr = tacticalErr;
           const status = tacticalErr?.status || tacticalErr?.httpStatusCode || tacticalErr?.code;
           const isRetryable = status === 503 || status === 429 || String(tacticalErr?.message || "").includes("503") || String(tacticalErr?.message || "").includes("429") || String(tacticalErr?.message || "").includes("Service Unavailable") || String(tacticalErr?.message || "").includes("overloaded");
-          if (isRetryable && attempt < MAX_TACTICAL_RETRIES - 1) {
-            const delay = Math.pow(2, attempt) * 1000;
-            console.log(`Tactical API error (${status || "unknown"}). Retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_TACTICAL_RETRIES})...`);
-            await new Promise(r => setTimeout(r, delay));
-            continue;
+          if (isRetryable) {
+            tactRetryModelAttempts++;
+            if (tactRetryModelAttempts >= 2 && tactModelIdx < TACTICAL_MODELS.length - 1) {
+              tactModelIdx++;
+              tactModelName = TACTICAL_MODELS[tactModelIdx];
+              tactRetryModelAttempts = 0;
+              console.log(`Tactical: switching to fallback model ${tactModelName}`);
+              model = genAI.getGenerativeModel({
+                model: tactModelName,
+                systemInstruction: tacticalPrompt,
+                generationConfig: { temperature: 0.1, maxOutputTokens: 4096 },
+              });
+              await new Promise(r => setTimeout(r, 2000));
+              continue;
+            }
+            if (attempt < MAX_TACTICAL_RETRIES - 1) {
+              const delay = Math.pow(2, attempt) * 1000;
+              console.log(`Tactical API error (${status || "unknown"}, model=${tactModelName}). Retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_TACTICAL_RETRIES})...`);
+              await new Promise(r => setTimeout(r, delay));
+              continue;
+            }
           }
           break;
         }
@@ -2535,6 +2653,928 @@ ${playbookContext}`;
         try { fs.unlinkSync(path); } catch {}
       }
     }
+  });
+
+  // ─── Trading Diary ──────────────────────────────────────────
+  const handleDiaryList = async (req: any, res: any) => {
+    try {
+      const userId = getUserId(res);
+      const tickerId = parseInt(req.params.tickerId as string);
+      if (isNaN(tickerId)) return res.status(400).json({ message: "Invalid ticker ID" });
+      const entries = await storage.getDiaryEntries(tickerId, userId);
+      res.json(entries);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  };
+
+  app.get("/api/tickers/:tickerId/diary", isAuthenticated, handleDiaryList);
+
+  app.get("/api/diary/entry/:id", isAuthenticated, async (req, res) => {
+    try {
+      const userId = getUserId(res);
+      const id = parseInt(req.params.id as string);
+      if (isNaN(id)) return res.status(400).json({ message: "Invalid diary ID" });
+      const entry = await storage.getDiaryEntry(id, userId);
+      if (!entry) return res.status(404).json({ message: "Diary entry not found" });
+      res.json(entry);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.get("/api/diary/:tickerId", isAuthenticated, handleDiaryList);
+
+  app.patch("/api/diary/:id", isAuthenticated, async (req, res) => {
+    try {
+      const userId = getUserId(res);
+      const id = parseInt(req.params.id as string);
+      if (isNaN(id)) return res.status(400).json({ message: "Invalid diary ID" });
+      const { userClosingThought, isFinalized } = req.body;
+      const updates: any = {};
+      if (userClosingThought !== undefined) updates.userClosingThought = userClosingThought;
+      if (isFinalized !== undefined) updates.isFinalized = isFinalized;
+      const updated = await storage.updateDiary(id, userId, updates);
+      if (!updated) return res.status(404).json({ message: "Diary entry not found" });
+      res.json(updated);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.get("/api/diary/date-check/:tickerId/:date", isAuthenticated, async (req, res) => {
+    try {
+      const userId = getUserId(res);
+      const tickerId = parseInt(req.params.tickerId as string);
+      const date = req.params.date as string;
+      if (isNaN(tickerId)) return res.status(400).json({ message: "Invalid ticker ID" });
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ message: "Invalid date format (YYYY-MM-DD)" });
+
+      const contextStack = await storage.getPlaybookContextStack(tickerId, userId, date);
+      const hasPlaybook = !!(contextStack.daily || contextStack.weekly || contextStack.monthly);
+
+      const chatHistory = await storage.getChatMessagesByTicker(tickerId, userId);
+      const hasChat = chatHistory.some(m => {
+        if (!m.createdAt || m.role !== "user") return false;
+        const msgNY = new Date(new Date(m.createdAt).toLocaleString("en-US", { timeZone: "America/New_York" }));
+        const msgDateStr = `${msgNY.getFullYear()}-${String(msgNY.getMonth() + 1).padStart(2, "0")}-${String(msgNY.getDate()).padStart(2, "0")}`;
+        return msgDateStr === date;
+      });
+
+      const existingEntry = await storage.getDiaryByDate(tickerId, userId, date);
+
+      res.json({ hasPlaybook, hasChat, hasExistingEntry: !!existingEntry });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.get("/api/diary/:tickerId/:date", isAuthenticated, async (req, res) => {
+    try {
+      const userId = getUserId(res);
+      const tickerId = parseInt(req.params.tickerId as string);
+      const date = req.params.date as string;
+      if (isNaN(tickerId)) return res.status(400).json({ message: "Invalid ticker ID" });
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ message: "Invalid date format (YYYY-MM-DD)" });
+      const entry = await storage.getDiaryByDate(tickerId, userId, date);
+      if (!entry) return res.status(404).json({ message: "No diary entry for this date" });
+      res.json(entry);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.post("/api/diary/generate", isAuthenticated, upload.fields([
+    { name: "daily_chart", maxCount: 1 },
+    { name: "weekly_chart", maxCount: 1 },
+    { name: "monthly_chart", maxCount: 1 },
+  ]), async (req, res) => {
+    try {
+      const userId = getUserId(res);
+      const tickerId = parseInt(req.body.tickerId);
+      const date = req.body.date;
+      if (!tickerId || !date) return res.status(400).json({ message: "tickerId and date are required" });
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ message: "Invalid date format (YYYY-MM-DD)" });
+
+      const ticker = await storage.getTicker(tickerId, userId);
+      if (!ticker) return res.status(404).json({ message: "Ticker not found" });
+
+      const existing = await storage.getDiaryByDate(tickerId, userId, date);
+      if (existing) {
+        return res.json(existing);
+      }
+
+      const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+      const dailyChartFile = files?.daily_chart?.[0];
+      const weeklyChartFile = files?.weekly_chart?.[0];
+      const monthlyChartFile = files?.monthly_chart?.[0];
+
+      const allowedMimes = ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"];
+      const allChartFiles = [dailyChartFile, weeklyChartFile, monthlyChartFile].filter(Boolean) as Express.Multer.File[];
+      for (const f of allChartFiles) {
+        if (!allowedMimes.includes(f.mimetype)) {
+          try { fs.unlinkSync(f.path); } catch {}
+          return res.status(400).json({ message: `Invalid file type: ${f.mimetype}. Only image files are allowed.` });
+        }
+        const ext = path.extname(f.originalname).toLowerCase();
+        if (![".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(ext)) {
+          try { fs.unlinkSync(f.path); } catch {}
+          return res.status(400).json({ message: `Invalid file extension: ${ext}. Only image files are allowed.` });
+        }
+      }
+
+      const contextStack = await storage.getPlaybookContextStack(tickerId, userId, date);
+      const chatHistory = await storage.getChatMessagesByTicker(tickerId, userId);
+      const dayMessagesForValidation = chatHistory.filter(m => {
+        if (!m.createdAt) return false;
+        const msgNY = new Date(new Date(m.createdAt).toLocaleString("en-US", { timeZone: "America/New_York" }));
+        const msgDateStr = `${msgNY.getFullYear()}-${String(msgNY.getMonth() + 1).padStart(2, "0")}-${String(msgNY.getDate()).padStart(2, "0")}`;
+        return msgDateStr === date;
+      });
+
+      const hasUserChatToday = dayMessagesForValidation.some(m => m.role === "user");
+
+      const hasAnyChart = !!(dailyChartFile || weeklyChartFile || monthlyChartFile);
+      if (!hasAnyChart && !hasUserChatToday) {
+        return res.status(400).json({ message: "Either a closing chart or tactical chat history for the day is required to generate a diary." });
+      }
+
+      const persistChartFile = (file: Express.Multer.File): string => {
+        const ext = path.extname(file.originalname) || ".png";
+        const safeName = `${Date.now()}-${Math.random().toString(36).slice(2, 12)}${ext}`;
+        const destDir = path.join(process.cwd(), "public", "uploads");
+        if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+        const destPath = path.join(destDir, safeName);
+        fs.copyFileSync(file.path, destPath);
+        try { fs.unlinkSync(file.path); } catch {}
+        return `/uploads/${safeName}`;
+      };
+
+      const dailyChartUrl = dailyChartFile ? persistChartFile(dailyChartFile) : null;
+      const weeklyChartUrl = weeklyChartFile ? persistChartFile(weeklyChartFile) : null;
+      const monthlyChartUrl = monthlyChartFile ? persistChartFile(monthlyChartFile) : null;
+
+      const weeklyContextProvided = !!weeklyChartFile;
+      const monthlyContextProvided = !!monthlyChartFile;
+
+      const dayMessages = dayMessagesForValidation;
+
+      const dayImages = await storage.getUploadedImagesByDate(tickerId, userId, date);
+
+      const formatPlaybookForDiary = (pb: any, label: string) => {
+        const data = pb.playbookData as any;
+        let out = `\n## ${label} PLAYBOOK\n`;
+        out += `Bias: ${data.bias || "Open"}\n`;
+        out += `Macro Theme: ${data.macro_theme || "N/A"}\n`;
+        if (data.thesis) {
+          const thesisText = typeof data.thesis === "object" ? (data.thesis.summary || JSON.stringify(data.thesis)) : String(data.thesis);
+          out += `Thesis: ${thesisText.slice(0, 800)}\n`;
+        }
+        if (data.structural_zones) {
+          const allZones = [
+            ...(data.structural_zones.bullish_green || []),
+            ...(data.structural_zones.neutral_yellow || []),
+            ...(data.structural_zones.bearish_red || []),
+          ];
+          if (allZones.length > 0) {
+            out += `Key Levels: ${allZones.map((l: any) => `${l.price}${l.price_high ? `-${l.price_high}` : ""} (${l.label})`).join(", ")}\n`;
+          }
+        }
+        if (data.if_then_scenarios?.length > 0) {
+          out += `Scenarios:\n${data.if_then_scenarios.map((s: any) => `- ${s.condition} → ${s.outcome}`).join("\n")}\n`;
+        }
+        if (data.execution_checklist?.length > 0) {
+          out += `Checklist: ${data.execution_checklist.join("; ")}\n`;
+        }
+        return out;
+      };
+
+      const pbFoundCount = [contextStack.daily, contextStack.weekly, contextStack.monthly].filter(Boolean).length;
+      console.log(`[Diary] Context for ${date}: ${pbFoundCount} playbook(s) found (daily=${!!contextStack.daily}, weekly=${!!contextStack.weekly}, monthly=${!!contextStack.monthly}), ${dayMessages.length} chat message(s) for target date`);
+
+      let contextInfo = `Ticker: ${ticker.symbol} (${ticker.displayName})\nDiary Date: ${date}\n`;
+      if (contextStack.daily) contextInfo += formatPlaybookForDiary(contextStack.daily, "DAILY");
+      if (contextStack.weekly) contextInfo += formatPlaybookForDiary(contextStack.weekly, "WEEKLY");
+      if (contextStack.monthly) contextInfo += formatPlaybookForDiary(contextStack.monthly, "MONTHLY");
+
+      if (dayMessages.length > 0) {
+        contextInfo += "\n## CHAT LOG FOR THIS DAY\n";
+        for (const msg of dayMessages.slice(-40)) {
+          const time = new Date(msg.createdAt!).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" });
+          contextInfo += `[${time}] ${msg.role}: ${msg.content.slice(0, 500)}\n`;
+        }
+      }
+
+      if (dayImages.length > 0) {
+        contextInfo += "\n## UPLOADED IMAGES FOR THIS DAY\n";
+        contextInfo += `${dayImages.length} image(s) were uploaded during this session:\n`;
+        for (const img of dayImages) {
+          const time = img.uploadedAt ? new Date(img.uploadedAt).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" }) : "unknown";
+          contextInfo += `- [${time}] "${img.originalFilename}" (${img.mimeType}) → ${img.storedPath}\n`;
+        }
+      }
+
+      contextInfo += "\n## CHART AVAILABILITY\n";
+      contextInfo += `weekly_context_provided: ${weeklyContextProvided}\n`;
+      contextInfo += `monthly_context_provided: ${monthlyContextProvided}\n`;
+      if (dailyChartUrl) contextInfo += `- DAILY closing chart: PROVIDED (${dailyChartUrl})\n`;
+      else contextInfo += "- DAILY closing chart: NOT PROVIDED — use Daily Playbook text for context\n";
+      if (weeklyChartUrl) contextInfo += `- WEEKLY closing chart: PROVIDED (${weeklyChartUrl})\n`;
+      else contextInfo += "- WEEKLY closing chart: NOT PROVIDED — use Weekly Playbook JSON/text for context\n";
+      if (monthlyChartUrl) contextInfo += `- MONTHLY closing chart: PROVIDED (${monthlyChartUrl})\n`;
+      else contextInfo += "- MONTHLY closing chart: NOT PROVIDED — use Monthly Playbook JSON/text for context\n";
+
+      if (contextStack.weekly) {
+        const weeklyData = contextStack.weekly.playbookData as any;
+        contextInfo += "\n## WEEKLY PLAYBOOK RAW JSON (for Blueprint Alignment Audit)\n";
+        contextInfo += JSON.stringify(weeklyData, null, 2).slice(0, 4000) + "\n";
+      }
+      if (contextStack.monthly) {
+        const monthlyData = contextStack.monthly.playbookData as any;
+        contextInfo += "\n## MONTHLY PLAYBOOK RAW JSON (for Blueprint Alignment Audit)\n";
+        contextInfo += JSON.stringify(monthlyData, null, 2).slice(0, 4000) + "\n";
+      }
+
+      const imageRefsForResponse = dayImages.map(img => ({
+        filename: img.originalFilename,
+        path: img.storedPath,
+        uploadedAt: img.uploadedAt ? new Date(img.uploadedAt).toISOString() : null,
+        timestamp: img.uploadedAt ? new Date(img.uploadedAt).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" }) : "unknown",
+        context: "",
+        ai_critique: "",
+      }));
+
+      const chartImageParts: any[] = [];
+      const readFileAsBase64Part = (filePath: string, mimeType: string) => {
+        const absPath = path.join(process.cwd(), "public", filePath);
+        if (fs.existsSync(absPath)) {
+          const data = fs.readFileSync(absPath);
+          return { inlineData: { data: data.toString("base64"), mimeType } };
+        }
+        return null;
+      };
+
+      if (dailyChartUrl && dailyChartFile) {
+        const dailyPart = readFileAsBase64Part(dailyChartUrl, dailyChartFile.mimetype);
+        if (dailyPart) chartImageParts.push({ text: "DAILY closing chart:" }, dailyPart);
+      }
+      if (weeklyChartUrl && weeklyChartFile) {
+        const weeklyPart = readFileAsBase64Part(weeklyChartUrl, weeklyChartFile.mimetype);
+        if (weeklyPart) chartImageParts.push({ text: "WEEKLY closing chart:" }, weeklyPart);
+      }
+      if (monthlyChartUrl && monthlyChartFile) {
+        const monthlyPart = readFileAsBase64Part(monthlyChartUrl, monthlyChartFile.mimetype);
+        if (monthlyPart) chartImageParts.push({ text: "MONTHLY closing chart:" }, monthlyPart);
+      }
+
+      const chartsAvailable = [dailyChartUrl ? "Daily" : null, weeklyChartUrl ? "Weekly" : null, monthlyChartUrl ? "Monthly" : null].filter(Boolean);
+      const allChartsPresent = chartsAvailable.length === 3;
+      const noCharts = chartsAvailable.length === 0;
+
+      let analysisMode = "";
+      if (allChartsPresent) {
+        analysisMode = `ANALYSIS MODE: FULL MACRO-TO-MICRO (all 3 charts provided)
+Perform the complete multi-timeframe synthesis:
+Step 1 (Daily): Compare the Daily close to the morning's Playbook scenarios. Which levels held? Which broke? Was the bias correct?
+Step 2 (Weekly): Analyze the Weekly candle from the chart image. Did it close as an 'Inside Week,' 'Engulfing,' or 'Pin Bar'? Explain how this affects next week's bias.
+Step 3 (Monthly): Check the Monthly levels from the chart image. Is the Monthly trend still intact or is a macro breakdown occurring?
+Final Output: Synthesize all three visual timeframes into the 'bigger_picture' section.`;
+      } else if (noCharts) {
+        analysisMode = `ANALYSIS MODE: CHAT-ONLY RECAP (no charts provided)
+Focus on the tactical chat history and playbook text. Summarize what was discussed, which levels were referenced, and what the trader's sentiment was. Use playbook JSON data for all timeframe analysis. Also generate the "chat_recap" field summarizing key Q&A exchanges from the chat log.`;
+      } else {
+        analysisMode = `ANALYSIS MODE: ADAPTIVE (charts available: ${chartsAvailable.join(", ")})
+Focus on the ${chartsAvailable.join("/")} chart(s) provided. For missing timeframes, use the stored Playbook JSON/text to provide context. Note in your analysis: "Visual Weekly context was not provided" or "Visual Monthly context was not provided" where applicable. Still produce weekly_impact and monthly_impact using the playbook text data.`;
+      }
+
+      const systemInstruction = `You are an Institutional Risk Manager and Trading Post-Mortem Analyst for ${ticker.symbol}. The market date is ${date} (New York time).
+
+${analysisMode}
+
+BLUEPRINT ALIGNMENT AUDIT — CRITICAL:
+After completing your timeframe analysis, perform a Blueprint Alignment Audit:
+1. Read the WEEKLY PLAYBOOK RAW JSON carefully. Scan for ANY time-based rules, deadlines, flip dates, or decision days. Examples:
+   - "ES must hold 6900 until Tuesday"
+   - "6th Flip Date is March 15"
+   - "Decision Wednesday — bulls must reclaim 5950 by Wednesday close"
+   - "If price stays above X for 3 consecutive days..."
+2. Read the MONTHLY PLAYBOOK RAW JSON carefully. Scan for the same types of time-based rules at the macro level.
+3. For each time-based rule found:
+   a) Has the deadline date passed relative to today (${date})?
+   b) Did the market meet the stated price condition?
+   c) If the deadline passed AND the condition FAILED → mark status as "diverged"
+   d) If the deadline passed AND the condition was MET → mark status as "in_line"
+   e) If the deadline has NOT yet passed → mark event result as "pending"
+4. Example: If the Weekly Blueprint says "ES must hold 6900 until Tuesday" and today is Wednesday and price closed at 6850, the weekly status MUST be "diverged" with explanation "Price closed below 6900 after the Tuesday deadline — bullish scenario invalidated per expert rules."
+
+When analyzing the 'Bigger Picture,' prioritize the specific date-based triggers found in reports. If an author mentions a 'Flip Date' or 'Decision Tuesday,' explicitly state if the market passed or failed that expert's test today.
+
+Your analysis MUST be returned as a JSON object with these exact fields:
+
+{
+  "market_achievement": {
+    "summary": "2-3 paragraph narrative of what happened in the session",
+    "session_outcome": "TREND_CONTINUATION | REVERSAL | FAILED_BREAKOUT | CHOP | STABILIZED",
+    "key_moves": ["List of 3-5 significant price moves or events"]
+  },
+  "bigger_picture": {
+    "summary": "1-2 paragraphs synthesizing timeframe analysis (reference date-based triggers from expert playbooks)",
+    "weekly_impact": "How today's action affects the weekly thesis",
+    "monthly_impact": "How today's action affects the monthly bias"
+  },
+  "plan_adherence": {
+    "grade": "A | B | C | D | F",
+    "grade_rationale": "1-2 sentences explaining the grade",
+    "levels_defended": [{"price": 0, "label": "description", "status": "defended"}],
+    "levels_lost": [{"price": 0, "label": "description", "status": "lost"}],
+    "scenarios_triggered": [{"scenario": "IF/THEN description", "result": "what actually happened", "grade": "A-F"}]
+  },
+  "blueprint_alignment": {
+    "weekly": {
+      "status": "in_line | diverged | no_data",
+      "checked_events": [{"event": "rule or deadline name", "deadline": "the date or timeframe", "condition": "what must happen", "result": "passed | failed | pending", "explanation": "why it passed/failed"}],
+      "rationale": "Overall weekly alignment summary"
+    },
+    "monthly": {
+      "status": "in_line | diverged | holding | no_data",
+      "checked_events": [{"event": "rule or deadline name", "deadline": "the date or timeframe", "condition": "what must happen", "result": "passed | failed | pending", "explanation": "why it passed/failed"}],
+      "rationale": "Overall monthly alignment summary"
+    }
+  },
+  "closing_bias": "Bullish | Bearish | Neutral | Open",
+  "lesson_of_the_day": "A key takeaway from today's session",
+  "prep_for_tomorrow": "Key levels and scenarios to watch for the next session",
+  "road_ahead": "Predict the next major battleground based on structure",
+  "image_references": [{"filename": "chart.png", "path": "/uploads/xyz.png", "timestamp": "10:30 AM", "context": "Brief description", "ai_critique": "Technical analysis"}],
+  "chat_recap": [{"question": "key question from chat", "answer": "key answer or insight", "timestamp": "HH:MM AM/PM"}]
+}
+
+RULES:
+1. Base your analysis ONLY on the provided playbook context, chat log, and closing chart images — do not invent data
+2. If no playbook exists, grade plan adherence as "N/A" and note there was no morning plan
+3. Be specific about which levels held or broke, referencing exact prices from the playbook
+4. The grade should reflect how well the morning plan predicted actual market behavior
+5. If uploaded images are listed, include them in "image_references" with context and ai_critique
+6. The "road_ahead" field MUST reference specific price levels and structure
+7. If no Weekly Playbook exists, set blueprint_alignment.weekly.status to "no_data" with empty checked_events
+8. If no Monthly Playbook exists, set blueprint_alignment.monthly.status to "no_data" with empty checked_events
+9. If no time-based rules are found in a playbook, still set the status based on whether the overall thesis/bias is tracking (in_line) or not (diverged)
+10. The "chat_recap" field should contain 3-5 key Q&A exchanges from the chat log. If no chat history exists, return an empty array.
+11. Return ONLY the JSON object, no additional text or markdown`;
+
+      const DIARY_MODELS = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"];
+      let diaryModelIdx = 0;
+      let diaryModelName = DIARY_MODELS[0];
+      let model = genAI.getGenerativeModel({
+        model: diaryModelName,
+        systemInstruction,
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 8192,
+        },
+      });
+
+      let aiAnalysis: any = null;
+      let grade = "N/A";
+      let closingBias = "Open";
+
+      const MAX_ATTEMPTS_PER_MODEL = 2;
+      const MAX_TOTAL_ATTEMPTS = DIARY_MODELS.length * MAX_ATTEMPTS_PER_MODEL;
+      let diaryModelAttempts = 0;
+      let lastErr: any = null;
+      for (let attempt = 0; attempt < MAX_TOTAL_ATTEMPTS; attempt++) {
+        try {
+          const contentParts: any[] = [{ text: contextInfo }, ...chartImageParts];
+          console.log(`[Diary] Calling ${diaryModelName} (attempt ${attempt + 1}/${MAX_TOTAL_ATTEMPTS})...`);
+          const result = await model.generateContent(contentParts);
+          let responseText = result.response.text().trim();
+          responseText = responseText.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?\s*```$/, "");
+          responseText = responseText.replace(/,\s*([}\]])/g, "$1");
+          aiAnalysis = JSON.parse(responseText);
+          const modelRefs = Array.isArray(aiAnalysis.image_references) ? aiAnalysis.image_references : [];
+          const mergedRefs = imageRefsForResponse.map(ref => {
+            const match = modelRefs.find((mr: any) => mr.path === ref.path || mr.filename === ref.filename);
+            return match ? { ...ref, context: match.context || ref.context, ai_critique: match.ai_critique || ref.ai_critique } : ref;
+          });
+          aiAnalysis.image_references = mergedRefs;
+          grade = aiAnalysis.plan_adherence?.grade || "N/A";
+          closingBias = aiAnalysis.closing_bias || "Open";
+          console.log(`[Diary] Successfully generated with ${diaryModelName}`);
+          lastErr = null;
+          break;
+        } catch (err: any) {
+          lastErr = err;
+          const status = err?.status || err?.httpStatusCode;
+          const errMsg = String(err?.message || "");
+          const isOverloaded = status === 503 || status === 429 || errMsg.includes("503") || errMsg.includes("429") || errMsg.includes("Service Unavailable") || errMsg.includes("overloaded");
+          console.error(`[Diary] ${diaryModelName} error (attempt ${attempt + 1}):`, err?.message || err);
+
+          if (isOverloaded) {
+            diaryModelAttempts++;
+            if (diaryModelAttempts >= MAX_ATTEMPTS_PER_MODEL && diaryModelIdx < DIARY_MODELS.length - 1) {
+              diaryModelIdx++;
+              diaryModelName = DIARY_MODELS[diaryModelIdx];
+              diaryModelAttempts = 0;
+              console.log(`[Diary] Switching to fallback model: ${diaryModelName}`);
+              model = genAI.getGenerativeModel({
+                model: diaryModelName,
+                systemInstruction,
+                generationConfig: { temperature: 0.2, maxOutputTokens: 8192 },
+              });
+              await new Promise(r => setTimeout(r, 2000));
+              continue;
+            }
+            if (attempt < MAX_TOTAL_ATTEMPTS - 1) {
+              const delay = Math.pow(2, diaryModelAttempts) * 1000;
+              console.log(`[Diary] Retrying ${diaryModelName} in ${delay}ms...`);
+              await new Promise(r => setTimeout(r, delay));
+              continue;
+            }
+          }
+          break;
+        }
+      }
+
+      if (lastErr || !aiAnalysis) {
+        aiAnalysis = {
+          market_achievement: {
+            summary: "AI analysis was unavailable. Please try generating again later.",
+            session_outcome: "UNKNOWN",
+            key_moves: [],
+          },
+          bigger_picture: { summary: "N/A", weekly_impact: "N/A", monthly_impact: "N/A" },
+          plan_adherence: { grade: "N/A", grade_rationale: "Could not generate analysis", levels_defended: [], levels_lost: [], scenarios_triggered: [] },
+          closing_bias: "Open",
+          lesson_of_the_day: "N/A",
+          prep_for_tomorrow: "N/A",
+          road_ahead: "N/A",
+          image_references: imageRefsForResponse,
+          blueprint_alignment: {
+            weekly: { status: "no_data", checked_events: [], rationale: "AI analysis was unavailable" },
+            monthly: { status: "no_data", checked_events: [], rationale: "AI analysis was unavailable" },
+          },
+          chat_recap: [],
+        };
+        grade = "N/A";
+        closingBias = "Open";
+      }
+
+      const diary = await storage.createDiary({
+        userId,
+        tickerId,
+        date,
+        aiAnalysis,
+        isFinalized: false,
+        planAdherenceGrade: grade,
+        closingBias: closingBias,
+        dailyChartUrl,
+        weeklyChartUrl,
+        monthlyChartUrl,
+      });
+
+      res.status(201).json(diary);
+    } catch (err: any) {
+      console.error("Diary generation error:", err);
+      res.status(500).json({ message: err.message || "Failed to generate diary" });
+    }
+  });
+
+  app.patch("/api/diary/:id/regenerate", isAuthenticated, async (req, res) => {
+    try {
+      const userId = getUserId(res);
+      const id = parseInt(req.params.id as string);
+      if (isNaN(id)) return res.status(400).json({ message: "Invalid diary ID" });
+
+      const entry = await storage.getDiaryEntry(id, userId);
+      if (!entry) return res.status(404).json({ message: "Diary entry not found" });
+
+      const tickerId = entry.tickerId!;
+      const date = entry.date;
+      const ticker = await storage.getTicker(tickerId, userId);
+      if (!ticker) return res.status(404).json({ message: "Ticker not found" });
+
+      const contextStack = await storage.getPlaybookContextStack(tickerId, userId, date);
+      const chatHistory = await storage.getChatMessagesByTicker(tickerId, userId);
+      const dayMessages = chatHistory.filter(m => {
+        if (!m.createdAt) return false;
+        const msgNY = new Date(new Date(m.createdAt).toLocaleString("en-US", { timeZone: "America/New_York" }));
+        const msgDateStr = `${msgNY.getFullYear()}-${String(msgNY.getMonth() + 1).padStart(2, "0")}-${String(msgNY.getDate()).padStart(2, "0")}`;
+        return msgDateStr === date;
+      });
+
+      const pbFoundCount = [contextStack.daily, contextStack.weekly, contextStack.monthly].filter(Boolean).length;
+      console.log(`[Diary Regen] Context for ${date}: ${pbFoundCount} playbook(s) found (daily=${!!contextStack.daily}, weekly=${!!contextStack.weekly}, monthly=${!!contextStack.monthly}), ${dayMessages.length} chat message(s)`);
+
+      const formatPlaybookForDiary = (pb: any, label: string) => {
+        const data = pb.playbookData as any;
+        let out = `\n## ${label} PLAYBOOK\n`;
+        out += `Bias: ${data.bias || "Open"}\n`;
+        out += `Macro Theme: ${data.macro_theme || "N/A"}\n`;
+        if (data.thesis) {
+          const thesisText = typeof data.thesis === "object" ? (data.thesis.summary || JSON.stringify(data.thesis)) : String(data.thesis);
+          out += `Thesis: ${thesisText.slice(0, 800)}\n`;
+        }
+        if (data.structural_zones) {
+          const allZones = [
+            ...(data.structural_zones.bullish_green || []),
+            ...(data.structural_zones.neutral_yellow || []),
+            ...(data.structural_zones.bearish_red || []),
+          ];
+          if (allZones.length > 0) {
+            out += `Key Levels: ${allZones.map((l: any) => `${l.price}${l.price_high ? `-${l.price_high}` : ""} (${l.label})`).join(", ")}\n`;
+          }
+        }
+        if (data.if_then_scenarios?.length > 0) {
+          out += `Scenarios:\n${data.if_then_scenarios.map((s: any) => `- ${s.condition} → ${s.outcome}`).join("\n")}\n`;
+        }
+        if (data.execution_checklist?.length > 0) {
+          out += `Checklist: ${data.execution_checklist.join("; ")}\n`;
+        }
+        return out;
+      };
+
+      let contextInfo = `Ticker: ${ticker.symbol} (${ticker.displayName})\nDiary Date: ${date}\n`;
+      if (contextStack.daily) contextInfo += formatPlaybookForDiary(contextStack.daily, "DAILY");
+      if (contextStack.weekly) contextInfo += formatPlaybookForDiary(contextStack.weekly, "WEEKLY");
+      if (contextStack.monthly) contextInfo += formatPlaybookForDiary(contextStack.monthly, "MONTHLY");
+
+      if (dayMessages.length > 0) {
+        contextInfo += "\n## CHAT LOG FOR THIS DAY\n";
+        for (const msg of dayMessages.slice(-40)) {
+          const time = new Date(msg.createdAt!).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" });
+          contextInfo += `[${time}] ${msg.role}: ${msg.content.slice(0, 500)}\n`;
+        }
+      }
+
+      const dayImages = await storage.getUploadedImagesByDate(tickerId, userId, date);
+      if (dayImages.length > 0) {
+        contextInfo += "\n## UPLOADED IMAGES FOR THIS DAY\n";
+        contextInfo += `${dayImages.length} image(s) were uploaded during this session:\n`;
+        for (const img of dayImages) {
+          const time = img.uploadedAt ? new Date(img.uploadedAt).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" }) : "unknown";
+          contextInfo += `- [${time}] "${img.originalFilename}" (${img.mimeType}) → ${img.storedPath}\n`;
+        }
+      }
+
+      const dailyChartUrl = entry.dailyChartUrl;
+      const weeklyChartUrl = entry.weeklyChartUrl;
+      const monthlyChartUrl = entry.monthlyChartUrl;
+
+      contextInfo += "\n## CHART AVAILABILITY\n";
+      contextInfo += `weekly_context_provided: ${!!weeklyChartUrl}\n`;
+      contextInfo += `monthly_context_provided: ${!!monthlyChartUrl}\n`;
+      if (dailyChartUrl) contextInfo += `- DAILY closing chart: PROVIDED (${dailyChartUrl})\n`;
+      else contextInfo += "- DAILY closing chart: NOT PROVIDED — use Daily Playbook text for context\n";
+      if (weeklyChartUrl) contextInfo += `- WEEKLY closing chart: PROVIDED (${weeklyChartUrl})\n`;
+      else contextInfo += "- WEEKLY closing chart: NOT PROVIDED — use Weekly Playbook JSON/text for context\n";
+      if (monthlyChartUrl) contextInfo += `- MONTHLY closing chart: PROVIDED (${monthlyChartUrl})\n`;
+      else contextInfo += "- MONTHLY closing chart: NOT PROVIDED — use Monthly Playbook JSON/text for context\n";
+
+      if (contextStack.weekly) {
+        const weeklyData = contextStack.weekly.playbookData as any;
+        contextInfo += "\n## WEEKLY PLAYBOOK RAW JSON (for Blueprint Alignment Audit)\n";
+        contextInfo += JSON.stringify(weeklyData, null, 2).slice(0, 4000) + "\n";
+      }
+      if (contextStack.monthly) {
+        const monthlyData = contextStack.monthly.playbookData as any;
+        contextInfo += "\n## MONTHLY PLAYBOOK RAW JSON (for Blueprint Alignment Audit)\n";
+        contextInfo += JSON.stringify(monthlyData, null, 2).slice(0, 4000) + "\n";
+      }
+
+      const imageRefsForResponse = dayImages.map(img => ({
+        filename: img.originalFilename,
+        path: img.storedPath,
+        uploadedAt: img.uploadedAt ? new Date(img.uploadedAt).toISOString() : null,
+        timestamp: img.uploadedAt ? new Date(img.uploadedAt).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" }) : "unknown",
+        context: "",
+        ai_critique: "",
+      }));
+
+      const chartImageParts: any[] = [];
+      const readFileAsBase64Part = (filePath: string, mimeType: string) => {
+        const absPath = path.join(process.cwd(), "public", filePath);
+        if (fs.existsSync(absPath)) {
+          const data = fs.readFileSync(absPath);
+          return { inlineData: { data: data.toString("base64"), mimeType } };
+        }
+        return null;
+      };
+
+      const guessMime = (url: string) => {
+        const ext = path.extname(url).toLowerCase();
+        if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+        if (ext === ".webp") return "image/webp";
+        if (ext === ".gif") return "image/gif";
+        return "image/png";
+      };
+
+      if (dailyChartUrl) {
+        const part = readFileAsBase64Part(dailyChartUrl, guessMime(dailyChartUrl));
+        if (part) chartImageParts.push({ text: "DAILY closing chart:" }, part);
+      }
+      if (weeklyChartUrl) {
+        const part = readFileAsBase64Part(weeklyChartUrl, guessMime(weeklyChartUrl));
+        if (part) chartImageParts.push({ text: "WEEKLY closing chart:" }, part);
+      }
+      if (monthlyChartUrl) {
+        const part = readFileAsBase64Part(monthlyChartUrl, guessMime(monthlyChartUrl));
+        if (part) chartImageParts.push({ text: "MONTHLY closing chart:" }, part);
+      }
+
+      const chartsAvailable = [dailyChartUrl ? "Daily" : null, weeklyChartUrl ? "Weekly" : null, monthlyChartUrl ? "Monthly" : null].filter(Boolean);
+      const allChartsPresent = chartsAvailable.length === 3;
+      const noCharts = chartsAvailable.length === 0;
+
+      let analysisMode = "";
+      if (allChartsPresent) {
+        analysisMode = `ANALYSIS MODE: FULL MACRO-TO-MICRO (all 3 charts provided)
+Perform the complete multi-timeframe synthesis:
+Step 1 (Daily): Compare the Daily close to the morning's Playbook scenarios. Which levels held? Which broke? Was the bias correct?
+Step 2 (Weekly): Analyze the Weekly candle from the chart image. Did it close as an 'Inside Week,' 'Engulfing,' or 'Pin Bar'? Explain how this affects next week's bias.
+Step 3 (Monthly): Check the Monthly levels from the chart image. Is the Monthly trend still intact or is a macro breakdown occurring?
+Final Output: Synthesize all three visual timeframes into the 'bigger_picture' section.`;
+      } else if (noCharts) {
+        analysisMode = `ANALYSIS MODE: CHAT-ONLY RECAP (no charts provided)
+Focus on the tactical chat history and playbook text. Summarize what was discussed, which levels were referenced, and what the trader's sentiment was. Use playbook JSON data for all timeframe analysis. Also generate the "chat_recap" field summarizing key Q&A exchanges from the chat log.`;
+      } else {
+        analysisMode = `ANALYSIS MODE: ADAPTIVE (charts available: ${chartsAvailable.join(", ")})
+Focus on the ${chartsAvailable.join("/")} chart(s) provided. For missing timeframes, use the stored Playbook JSON/text to provide context. Note in your analysis: "Visual Weekly context was not provided" or "Visual Monthly context was not provided" where applicable. Still produce weekly_impact and monthly_impact using the playbook text data.`;
+      }
+
+      const systemInstruction = `You are an Institutional Risk Manager and Trading Post-Mortem Analyst for ${ticker.symbol}. The market date is ${date} (New York time).
+
+${analysisMode}
+
+BLUEPRINT ALIGNMENT AUDIT — CRITICAL:
+After completing your timeframe analysis, perform a Blueprint Alignment Audit:
+1. Read the WEEKLY PLAYBOOK RAW JSON carefully. Scan for ANY time-based rules, deadlines, flip dates, or decision days.
+2. Read the MONTHLY PLAYBOOK RAW JSON carefully. Scan for the same types of time-based rules at the macro level.
+3. For each time-based rule found:
+   a) Has the deadline date passed relative to today (${date})?
+   b) Did the market meet the stated price condition?
+   c) If the deadline passed AND the condition FAILED → mark status as "diverged"
+   d) If the deadline passed AND the condition was MET → mark status as "in_line"
+   e) If the deadline has NOT yet passed → mark event result as "pending"
+
+Your analysis MUST be returned as a JSON object with these exact fields:
+
+{
+  "market_achievement": { "summary": "...", "session_outcome": "TREND_CONTINUATION | REVERSAL | FAILED_BREAKOUT | CHOP | STABILIZED", "key_moves": ["..."] },
+  "bigger_picture": { "summary": "...", "weekly_impact": "...", "monthly_impact": "..." },
+  "plan_adherence": { "grade": "A | B | C | D | F", "grade_rationale": "...", "levels_defended": [{"price": 0, "label": "...", "status": "defended"}], "levels_lost": [{"price": 0, "label": "...", "status": "lost"}], "scenarios_triggered": [{"scenario": "...", "result": "...", "grade": "A-F"}] },
+  "blueprint_alignment": { "weekly": { "status": "in_line | diverged | no_data", "checked_events": [], "rationale": "..." }, "monthly": { "status": "in_line | diverged | holding | no_data", "checked_events": [], "rationale": "..." } },
+  "closing_bias": "Bullish | Bearish | Neutral | Open",
+  "lesson_of_the_day": "...",
+  "prep_for_tomorrow": "...",
+  "road_ahead": "...",
+  "image_references": [],
+  "chat_recap": []
+}
+
+RULES:
+1. Base your analysis ONLY on the provided playbook context, chat log, and closing chart images
+2. If no playbook exists, grade plan adherence as "N/A" and note there was no morning plan
+3. Be specific about which levels held or broke, referencing exact prices
+4. The grade should reflect how well the morning plan predicted actual market behavior
+5. If uploaded images are listed, include them in "image_references" with context and ai_critique
+6. The "road_ahead" field MUST reference specific price levels and structure
+7. If no Weekly Playbook exists, set blueprint_alignment.weekly.status to "no_data"
+8. If no Monthly Playbook exists, set blueprint_alignment.monthly.status to "no_data"
+9. The "chat_recap" field should contain 3-5 key Q&A exchanges from the chat log. If no chat history exists, return an empty array.
+10. Return ONLY the JSON object, no additional text or markdown`;
+
+      const REGEN_MODELS = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"];
+      let regenModelIdx = 0;
+      let regenModelName = REGEN_MODELS[0];
+      let model = genAI.getGenerativeModel({
+        model: regenModelName,
+        systemInstruction,
+        generationConfig: { temperature: 0.2, maxOutputTokens: 8192 },
+      });
+
+      let aiAnalysis: any = null;
+      let grade = "N/A";
+      let closingBias = "Open";
+
+      const MAX_ATTEMPTS_PER_MODEL = 2;
+      const MAX_TOTAL_ATTEMPTS = REGEN_MODELS.length * MAX_ATTEMPTS_PER_MODEL;
+      let regenModelAttempts = 0;
+      let lastErr: any = null;
+      for (let attempt = 0; attempt < MAX_TOTAL_ATTEMPTS; attempt++) {
+        try {
+          const contentParts: any[] = [{ text: contextInfo }, ...chartImageParts];
+          console.log(`[Diary Regen] Calling ${regenModelName} (attempt ${attempt + 1}/${MAX_TOTAL_ATTEMPTS})...`);
+          const result = await model.generateContent(contentParts);
+          let responseText = result.response.text().trim();
+          responseText = responseText.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?\s*```$/, "");
+          responseText = responseText.replace(/,\s*([}\]])/g, "$1");
+          aiAnalysis = JSON.parse(responseText);
+          const modelRefs = Array.isArray(aiAnalysis.image_references) ? aiAnalysis.image_references : [];
+          const mergedRefs = imageRefsForResponse.map(ref => {
+            const match = modelRefs.find((mr: any) => mr.path === ref.path || mr.filename === ref.filename);
+            return match ? { ...ref, context: match.context || ref.context, ai_critique: match.ai_critique || ref.ai_critique } : ref;
+          });
+          aiAnalysis.image_references = mergedRefs;
+          grade = aiAnalysis.plan_adherence?.grade || "N/A";
+          closingBias = aiAnalysis.closing_bias || "Open";
+          console.log(`[Diary Regen] Successfully regenerated with ${regenModelName}`);
+          lastErr = null;
+          break;
+        } catch (err: any) {
+          lastErr = err;
+          const status = err?.status || err?.httpStatusCode;
+          const errMsg = String(err?.message || "");
+          const isOverloaded = status === 503 || status === 429 || errMsg.includes("503") || errMsg.includes("429") || errMsg.includes("Service Unavailable") || errMsg.includes("overloaded");
+          console.error(`[Diary Regen] ${regenModelName} error (attempt ${attempt + 1}):`, err?.message || err);
+
+          if (isOverloaded) {
+            regenModelAttempts++;
+            if (regenModelAttempts >= MAX_ATTEMPTS_PER_MODEL && regenModelIdx < REGEN_MODELS.length - 1) {
+              regenModelIdx++;
+              regenModelName = REGEN_MODELS[regenModelIdx];
+              regenModelAttempts = 0;
+              console.log(`[Diary Regen] Switching to fallback model: ${regenModelName}`);
+              model = genAI.getGenerativeModel({
+                model: regenModelName,
+                systemInstruction,
+                generationConfig: { temperature: 0.2, maxOutputTokens: 8192 },
+              });
+              await new Promise(r => setTimeout(r, 2000));
+              continue;
+            }
+            if (attempt < MAX_TOTAL_ATTEMPTS - 1) {
+              const delay = Math.pow(2, regenModelAttempts) * 1000;
+              console.log(`[Diary Regen] Retrying ${regenModelName} in ${delay}ms...`);
+              await new Promise(r => setTimeout(r, delay));
+              continue;
+            }
+          }
+          break;
+        }
+      }
+
+      if (lastErr || !aiAnalysis) {
+        return res.status(503).json({
+          message: `AI service is currently busy. Attempted models: ${REGEN_MODELS.slice(0, regenModelIdx + 1).join(" → ")}. Please try again in a moment.`
+        });
+      }
+
+      const updated = await storage.updateDiary(id, userId, {
+        aiAnalysis,
+        planAdherenceGrade: grade,
+        closingBias: closingBias,
+      });
+
+      res.json(updated);
+    } catch (err: any) {
+      console.error("Diary regeneration error:", err);
+      res.status(500).json({ message: err.message || "Failed to regenerate diary" });
+    }
+  });
+
+  app.post("/api/diary/:id/chat", isAuthenticated, async (req, res) => {
+    try {
+      const userId = getUserId(res);
+      const id = parseInt(req.params.id as string);
+      if (isNaN(id)) return res.status(400).json({ message: "Invalid diary ID" });
+      const { message } = req.body;
+      if (!message || typeof message !== "string" || !message.trim()) {
+        return res.status(400).json({ message: "Message is required" });
+      }
+
+      const entry = await storage.getDiaryEntry(id, userId);
+      if (!entry) return res.status(404).json({ message: "Diary entry not found" });
+
+      const ticker = entry.tickerId ? await storage.getTicker(entry.tickerId, userId) : null;
+      const analysis = entry.aiAnalysis as any;
+
+      let diaryContext = `## DIARY ENTRY FOR ${entry.date}\n`;
+      diaryContext += `Ticker: ${ticker?.symbol || "Unknown"}\n`;
+      diaryContext += `Grade: ${entry.planAdherenceGrade || "N/A"}\n`;
+      diaryContext += `Closing Bias: ${entry.closingBias || "Open"}\n`;
+      if (analysis?.market_achievement?.summary) {
+        diaryContext += `Market Achievement: ${analysis.market_achievement.summary}\n`;
+      }
+      if (analysis?.bigger_picture?.summary) {
+        diaryContext += `Bigger Picture: ${analysis.bigger_picture.summary}\n`;
+      }
+      if (analysis?.plan_adherence?.grade_rationale) {
+        diaryContext += `Grade Rationale: ${analysis.plan_adherence.grade_rationale}\n`;
+      }
+      if (analysis?.lesson_of_the_day) {
+        diaryContext += `Lesson: ${analysis.lesson_of_the_day}\n`;
+      }
+      if (entry.userClosingThought) {
+        diaryContext += `Trader's Closing Thought: ${entry.userClosingThought}\n`;
+      }
+
+      const systemInstruction = `You are a Trading Mentor reviewing a past diary entry for ${ticker?.symbol || "an instrument"}. The diary is from ${entry.date}. The trader is reflecting on this past session and asking follow-up questions ("Talk to the Past").
+
+Your role:
+- Help the trader extract deeper lessons from this past session
+- Reference specific data from the diary (levels, grade, outcomes) in your answers
+- Be constructive and educational — focus on pattern recognition and improvement
+- Keep responses concise (2-3 paragraphs)
+- If the trader asks "what could I have done differently?" — reference the specific playbook data and scenarios
+
+## DIARY CONTEXT
+${diaryContext}
+
+Respond in plain text, no JSON or code blocks.`;
+
+      const DIARY_CHAT_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"];
+      let diaryChatModelIdx = 0;
+      let diaryChatModelName = DIARY_CHAT_MODELS[0];
+      let model = genAI.getGenerativeModel({
+        model: diaryChatModelName,
+        systemInstruction,
+        generationConfig: {
+          temperature: 0.3,
+          maxOutputTokens: 4096,
+        },
+      });
+
+      let aiResponse = "";
+      const MAX_RETRIES = 4;
+      let lastErr: any = null;
+      let diaryChatRetryAttempts = 0;
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        try {
+          const result = await model.generateContent(message);
+          aiResponse = result.response.text();
+          lastErr = null;
+          break;
+        } catch (err: any) {
+          lastErr = err;
+          const status = err?.status || err?.httpStatusCode;
+          const isRetryable = status === 503 || status === 429 || String(err?.message || "").includes("503") || String(err?.message || "").includes("429") || String(err?.message || "").includes("Service Unavailable") || String(err?.message || "").includes("overloaded");
+          if (isRetryable) {
+            diaryChatRetryAttempts++;
+            if (diaryChatRetryAttempts >= 2 && diaryChatModelIdx < DIARY_CHAT_MODELS.length - 1) {
+              diaryChatModelIdx++;
+              diaryChatModelName = DIARY_CHAT_MODELS[diaryChatModelIdx];
+              diaryChatRetryAttempts = 0;
+              console.log(`[DiaryChat] Switching to fallback model: ${diaryChatModelName}`);
+              model = genAI.getGenerativeModel({
+                model: diaryChatModelName,
+                systemInstruction,
+                generationConfig: { temperature: 0.3, maxOutputTokens: 4096 },
+              });
+              await new Promise(r => setTimeout(r, 2000));
+              continue;
+            }
+            if (attempt < MAX_RETRIES - 1) {
+              const delay = Math.pow(2, attempt) * 1000;
+              console.log(`[DiaryChat] ${diaryChatModelName} error (${status}). Retrying in ${delay}ms...`);
+              await new Promise(r => setTimeout(r, delay));
+              continue;
+            }
+          }
+          break;
+        }
+      }
+
+      if (lastErr || !aiResponse) {
+        aiResponse = "I'm unable to process your reflection right now. Please try again in a moment.";
+      }
+
+      res.json({ message: aiResponse });
+    } catch (err: any) {
+      console.error("Diary chat error:", err);
+      res.status(500).json({ message: err.message || "Failed to process reflection" });
+    }
+  });
+
+  app.get("/uploads/:filename", isAuthenticated, async (req, res) => {
+    const userId = getUserId(res);
+    const filename = req.params.filename as string;
+    if (!filename || /[\/\\]/.test(filename)) {
+      return res.status(400).json({ message: "Invalid filename" });
+    }
+    const storedPath = `/uploads/${filename}`;
+    const allUserImages = await db.select().from(uploadedImages)
+      .where(and(eq(uploadedImages.userId, userId), eq(uploadedImages.storedPath, storedPath)))
+      .limit(1);
+    if (allUserImages.length === 0) {
+      const diaryCharts = await db.select().from(tradingDiary)
+        .where(and(
+          eq(tradingDiary.userId, userId),
+          or(
+            eq(tradingDiary.dailyChartUrl, storedPath),
+            eq(tradingDiary.weeklyChartUrl, storedPath),
+            eq(tradingDiary.monthlyChartUrl, storedPath),
+          )
+        ))
+        .limit(1);
+      if (diaryCharts.length === 0) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+    }
+    const filePath = path.join(process.cwd(), "public", "uploads", filename);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ message: "File not found" });
+    }
+    res.sendFile(filePath);
   });
 
   return httpServer;
