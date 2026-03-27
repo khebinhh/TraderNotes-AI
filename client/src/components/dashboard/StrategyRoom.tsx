@@ -23,7 +23,7 @@ import { SidebarItem } from "./SidebarItem";
 import { getTopicName, type ChatSession } from "@/lib/sidebar-utils";
 import { PostMarketRecap } from "./PostMarketRecap";
 import { useToast } from "@/hooks/use-toast";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 
 const ACCEPTED_FILE_TYPES = ".pdf,.png,.jpg,.jpeg,.csv";
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -326,6 +326,7 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
   const prevTickerIdRef = useRef<number | undefined>(activeTicker?.id);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [isScrolledUp, setIsScrolledUp] = useState(false);
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const isMobile = useIsMobile();
@@ -494,13 +495,21 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
   });
 
   useEffect(() => {
-    if (scrollRef.current && !activePlaybook) {
-      const scrollContainer = scrollRef.current.querySelector("[data-radix-scroll-area-viewport]");
-      if (scrollContainer) {
-        scrollContainer.scrollTop = scrollContainer.scrollHeight;
-      }
-    }
-  }, [messages, optimisticMessages, isAiLoading, activePlaybook]);
+    const viewport = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]");
+    if (!viewport) return;
+    const onScroll = () => {
+      const distFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+      setIsScrolledUp(distFromBottom > 300);
+    };
+    viewport.addEventListener("scroll", onScroll, { passive: true });
+    return () => viewport.removeEventListener("scroll", onScroll);
+  }, [activePlaybook]);
+
+  useEffect(() => {
+    if (isScrolledUp || activePlaybook) return;
+    const scrollContainer = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]");
+    if (scrollContainer) scrollContainer.scrollTop = scrollContainer.scrollHeight;
+  }, [messages, optimisticMessages, isAiLoading, activePlaybook, isScrolledUp]);
 
   const fireRequest = useCallback((content: string, files: File[], mode?: "playbook" | "chat") => {
     if (!activeTicker) return;
@@ -1048,7 +1057,8 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
           />
         ) : (
           <>
-            <ScrollArea className="flex-1" ref={scrollRef}>
+            <div className="relative flex-1 min-h-0">
+            <ScrollArea className="h-full" ref={scrollRef}>
               <div className="max-w-3xl mx-auto py-4 md:py-6 px-3 md:px-6 space-y-4 md:space-y-6">
                 {[...messages, ...optimisticMessages].map((msg) => (
                   <motion.div
@@ -1228,6 +1238,27 @@ export function StrategyRoom({ activeTicker, activeNote, notes, selectedNoteId, 
                 )}
               </div>
             </ScrollArea>
+            <AnimatePresence>
+              {isScrolledUp && (
+                <motion.button
+                  key="jump-to-present-strategy"
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 6 }}
+                  transition={{ duration: 0.18, ease: "easeOut" }}
+                  onClick={() => {
+                    const vp = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]");
+                    if (vp) vp.scrollTo({ top: vp.scrollHeight, behavior: "smooth" });
+                    setIsScrolledUp(false);
+                  }}
+                  className="absolute bottom-3 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider text-primary border border-primary/40 bg-black/70 backdrop-blur-sm shadow-lg hover:bg-black/90 transition-colors"
+                  data-testid="button-jump-to-present-strategy"
+                >
+                  ↓ Jump to Present
+                </motion.button>
+              )}
+            </AnimatePresence>
+            </div>
 
             <ChatInput
               activeTicker={activeTicker}

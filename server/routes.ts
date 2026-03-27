@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { db } from "./db";
 import { uploadedImages, tradingDiary } from "@shared/schema";
-import { eq, and, or } from "drizzle-orm";
+import { eq, and, or, sql } from "drizzle-orm";
 import { isAuthenticated } from "./auth";
 import { getLiveRatio, isFuturesSymbol, getFuturesMapping } from "./priceService";
 import { getMarketDate } from "./market-date";
@@ -24,6 +24,41 @@ import fs from "fs";
 import path from "path";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { GoogleAIFileManager, FileState } from "@google/generative-ai/server";
+import { objectStorageClient } from "./replit_integrations/object_storage/objectStorage";
+
+// ─── Object Storage Helpers ────────────────────────────────────────────────
+// Stores an internal GCS reference "gcs:bucketName/objectName" rather than
+// a public https:// URL, since objects live in the private bucket.
+// Backend streams the file through the authenticated /uploads/ proxy.
+async function uploadBufferToObjectStorage(
+  buffer: Buffer,
+  mimeType: string,
+  extension: string
+): Promise<string> {
+  const privateDir = process.env.PRIVATE_OBJECT_DIR || "";
+  if (!privateDir) throw new Error("PRIVATE_OBJECT_DIR not set");
+  // Format: /bucket-name/.private  → parts[1] = bucket, rest = prefix
+  const parts = privateDir.replace(/^\//, "").split("/");
+  const bucketName = parts[0];
+  const prefix = parts.slice(1).join("/");
+  const uuid = `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+  const objectName = `${prefix}/uploads/${uuid}${extension}`;
+  const bucket = objectStorageClient.bucket(bucketName);
+  const file = bucket.file(objectName);
+  await file.save(buffer, { contentType: mimeType, resumable: false });
+  // Return internal reference — served through authenticated /uploads/ proxy
+  return `gcs:${bucketName}/${objectName}`;
+}
+
+// Parse a gcs: reference back into bucket + object components
+function parseGcsRef(gcsRef: string): { bucketName: string; objectName: string } | null {
+  if (!gcsRef.startsWith("gcs:")) return null;
+  const rest = gcsRef.slice(4);
+  const slash = rest.indexOf("/");
+  if (slash === -1) return null;
+  return { bucketName: rest.slice(0, slash), objectName: rest.slice(slash + 1) };
+}
+
 function parseTargetDate(horizon: string): string | null {
   if (!horizon) return null;
   const now = new Date();
@@ -103,6 +138,30 @@ const fileManager = new GoogleAIFileManager(process.env.GEMINI_API_KEY || "");
 
 function getUserId(res: Response): string {
   return res.locals.user!.id;
+}
+
+// Normalize chart URLs on diary records so `gcs:` paths become /uploads/ proxy URLs
+function normalizeDiaryChartUrls<T extends { intradayChartUrl?: string | null; dailyChartUrl?: string | null; weeklyChartUrl?: string | null; monthlyChartUrl?: string | null }>(entry: T): T {
+  return {
+    ...entry,
+    intradayChartUrl: entry.intradayChartUrl ? normalizeUploadPath(entry.intradayChartUrl) : entry.intradayChartUrl,
+    dailyChartUrl: entry.dailyChartUrl ? normalizeUploadPath(entry.dailyChartUrl) : entry.dailyChartUrl,
+    weeklyChartUrl: entry.weeklyChartUrl ? normalizeUploadPath(entry.weeklyChartUrl) : entry.weeklyChartUrl,
+    monthlyChartUrl: entry.monthlyChartUrl ? normalizeUploadPath(entry.monthlyChartUrl) : entry.monthlyChartUrl,
+  };
+}
+
+function normalizeUploadPath(storedPath: string): string {
+  if (!storedPath) return storedPath;
+  // Pass-through absolute URLs (legacy or external)
+  if (storedPath.startsWith("http://") || storedPath.startsWith("https://")) return storedPath;
+  // Internal GCS reference → proxy through authenticated /uploads/ endpoint
+  if (storedPath.startsWith("gcs:")) {
+    const basename = path.basename(storedPath);
+    return `/uploads/${basename}`;
+  }
+  const basename = path.basename(storedPath);
+  return `/uploads/${basename}`;
 }
 
 export async function registerRoutes(
@@ -363,17 +422,15 @@ export async function registerRoutes(
         const mime = inferMimeType(uf.originalname, uf.mimetype);
         if (mime.startsWith("image/")) {
           try {
-            const uploadsDir = path.join(process.cwd(), "public", "uploads");
-            if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-            const destName = `${Date.now()}-${Math.random().toString(36).slice(2)}${path.extname(uf.originalname)}`;
-            const destPath = path.join(uploadsDir, destName);
-            fs.copyFileSync(uf.path, destPath);
+            const buffer = fs.readFileSync(uf.path);
+            const ext = path.extname(uf.originalname) || ".png";
+            const storedUrl = await uploadBufferToObjectStorage(buffer, mime, ext);
             await storage.createUploadedImage({
               userId,
               tickerId,
               chatMessageId: userMessage.id,
               originalFilename: uf.originalname,
-              storedPath: `/uploads/${destName}`,
+              storedPath: storedUrl,
               mimeType: mime,
             });
           } catch (imgErr) {
@@ -2495,17 +2552,15 @@ ${playbookContext}`;
         const ufMime = inferMimeType(uf.originalname, uf.mimetype);
         if (ufMime.startsWith("image/")) {
           try {
-            const uploadsDir = path.join(process.cwd(), "public", "uploads");
-            if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-            const destName = `${Date.now()}-${Math.random().toString(36).slice(2)}${path.extname(uf.originalname)}`;
-            const destPath = path.join(uploadsDir, destName);
-            fs.copyFileSync(uf.path, destPath);
+            const buffer = fs.readFileSync(uf.path);
+            const ext = path.extname(uf.originalname) || ".png";
+            const storedUrl = await uploadBufferToObjectStorage(buffer, ufMime, ext);
             await storage.createUploadedImage({
               userId,
               tickerId,
               chatMessageId: tacticalUserMsg.id,
               originalFilename: uf.originalname,
-              storedPath: `/uploads/${destName}`,
+              storedPath: storedUrl,
               mimeType: ufMime,
             });
           } catch (imgErr) {
@@ -2662,7 +2717,7 @@ ${playbookContext}`;
       const tickerId = parseInt(req.params.tickerId as string);
       if (isNaN(tickerId)) return res.status(400).json({ message: "Invalid ticker ID" });
       const entries = await storage.getDiaryEntries(tickerId, userId);
-      res.json(entries);
+      res.json(entries.map(normalizeDiaryChartUrls));
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }
@@ -2677,7 +2732,7 @@ ${playbookContext}`;
       if (isNaN(id)) return res.status(400).json({ message: "Invalid diary ID" });
       const entry = await storage.getDiaryEntry(id, userId);
       if (!entry) return res.status(404).json({ message: "Diary entry not found" });
-      res.json(entry);
+      res.json(normalizeDiaryChartUrls(entry));
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }
@@ -2696,7 +2751,7 @@ ${playbookContext}`;
       if (isFinalized !== undefined) updates.isFinalized = isFinalized;
       const updated = await storage.updateDiary(id, userId, updates);
       if (!updated) return res.status(404).json({ message: "Diary entry not found" });
-      res.json(updated);
+      res.json(normalizeDiaryChartUrls(updated));
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }
@@ -2738,13 +2793,14 @@ ${playbookContext}`;
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ message: "Invalid date format (YYYY-MM-DD)" });
       const entry = await storage.getDiaryByDate(tickerId, userId, date);
       if (!entry) return res.status(404).json({ message: "No diary entry for this date" });
-      res.json(entry);
+      res.json(normalizeDiaryChartUrls(entry));
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }
   });
 
   app.post("/api/diary/generate", isAuthenticated, upload.fields([
+    { name: "intraday_chart", maxCount: 1 },
     { name: "daily_chart", maxCount: 1 },
     { name: "weekly_chart", maxCount: 1 },
     { name: "monthly_chart", maxCount: 1 },
@@ -2761,16 +2817,17 @@ ${playbookContext}`;
 
       const existing = await storage.getDiaryByDate(tickerId, userId, date);
       if (existing) {
-        return res.json(existing);
+        return res.json(normalizeDiaryChartUrls(existing));
       }
 
       const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+      const intradayChartFile = files?.intraday_chart?.[0];
       const dailyChartFile = files?.daily_chart?.[0];
       const weeklyChartFile = files?.weekly_chart?.[0];
       const monthlyChartFile = files?.monthly_chart?.[0];
 
       const allowedMimes = ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"];
-      const allChartFiles = [dailyChartFile, weeklyChartFile, monthlyChartFile].filter(Boolean) as Express.Multer.File[];
+      const allChartFiles = [intradayChartFile, dailyChartFile, weeklyChartFile, monthlyChartFile].filter(Boolean) as Express.Multer.File[];
       for (const f of allChartFiles) {
         if (!allowedMimes.includes(f.mimetype)) {
           try { fs.unlinkSync(f.path); } catch {}
@@ -2794,25 +2851,32 @@ ${playbookContext}`;
 
       const hasUserChatToday = dayMessagesForValidation.some(m => m.role === "user");
 
-      const hasAnyChart = !!(dailyChartFile || weeklyChartFile || monthlyChartFile);
-      if (!hasAnyChart && !hasUserChatToday) {
-        return res.status(400).json({ message: "Either a closing chart or tactical chat history for the day is required to generate a diary." });
+      // Require intraday chart OR chat history to generate (HTF-only is not sufficient)
+      const hasIntradayChart = !!intradayChartFile;
+      const hasAnyChart = !!(intradayChartFile || dailyChartFile || weeklyChartFile || monthlyChartFile);
+      if (!hasIntradayChart && !hasUserChatToday) {
+        return res.status(400).json({ message: "Upload an Intraday Session Chart or have tactical chat history for the day to generate a diary." });
       }
 
-      const persistChartFile = (file: Express.Multer.File): string => {
+      // Pre-read buffers for Gemini inline data BEFORE uploading (temp files get deleted after upload)
+      const intradayChartBuffer = intradayChartFile ? fs.readFileSync(intradayChartFile.path) : null;
+      const dailyChartBuffer = dailyChartFile ? fs.readFileSync(dailyChartFile.path) : null;
+      const weeklyChartBuffer = weeklyChartFile ? fs.readFileSync(weeklyChartFile.path) : null;
+      const monthlyChartBuffer = monthlyChartFile ? fs.readFileSync(monthlyChartFile.path) : null;
+
+      const persistChartFile = async (file: Express.Multer.File): Promise<string> => {
         const ext = path.extname(file.originalname) || ".png";
-        const safeName = `${Date.now()}-${Math.random().toString(36).slice(2, 12)}${ext}`;
-        const destDir = path.join(process.cwd(), "public", "uploads");
-        if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
-        const destPath = path.join(destDir, safeName);
-        fs.copyFileSync(file.path, destPath);
+        const mime = inferMimeType(file.originalname, file.mimetype);
+        const buffer = fs.readFileSync(file.path);
+        const url = await uploadBufferToObjectStorage(buffer, mime, ext);
         try { fs.unlinkSync(file.path); } catch {}
-        return `/uploads/${safeName}`;
+        return url;
       };
 
-      const dailyChartUrl = dailyChartFile ? persistChartFile(dailyChartFile) : null;
-      const weeklyChartUrl = weeklyChartFile ? persistChartFile(weeklyChartFile) : null;
-      const monthlyChartUrl = monthlyChartFile ? persistChartFile(monthlyChartFile) : null;
+      const intradayChartUrl = intradayChartFile ? await persistChartFile(intradayChartFile) : null;
+      const dailyChartUrl = dailyChartFile ? await persistChartFile(dailyChartFile) : null;
+      const weeklyChartUrl = weeklyChartFile ? await persistChartFile(weeklyChartFile) : null;
+      const monthlyChartUrl = monthlyChartFile ? await persistChartFile(monthlyChartFile) : null;
 
       const weeklyContextProvided = !!weeklyChartFile;
       const monthlyContextProvided = !!monthlyChartFile;
@@ -2875,14 +2939,17 @@ ${playbookContext}`;
       }
 
       contextInfo += "\n## CHART AVAILABILITY\n";
+      contextInfo += `intraday_chart_provided: ${hasIntradayChart}\n`;
       contextInfo += `weekly_context_provided: ${weeklyContextProvided}\n`;
       contextInfo += `monthly_context_provided: ${monthlyContextProvided}\n`;
-      if (dailyChartUrl) contextInfo += `- DAILY closing chart: PROVIDED (${dailyChartUrl})\n`;
-      else contextInfo += "- DAILY closing chart: NOT PROVIDED — use Daily Playbook text for context\n";
-      if (weeklyChartUrl) contextInfo += `- WEEKLY closing chart: PROVIDED (${weeklyChartUrl})\n`;
-      else contextInfo += "- WEEKLY closing chart: NOT PROVIDED — use Weekly Playbook JSON/text for context\n";
-      if (monthlyChartUrl) contextInfo += `- MONTHLY closing chart: PROVIDED (${monthlyChartUrl})\n`;
-      else contextInfo += "- MONTHLY closing chart: NOT PROVIDED — use Monthly Playbook JSON/text for context\n";
+      if (intradayChartUrl) contextInfo += `- INTRADAY session chart: PROVIDED — PRIMARY EXECUTION TAPE (${intradayChartUrl})\n`;
+      else contextInfo += "- INTRADAY session chart: NOT PROVIDED — use tactical chat log as primary session context\n";
+      if (dailyChartUrl) contextInfo += `- DAILY (HTF) candle chart: PROVIDED (${dailyChartUrl})\n`;
+      else contextInfo += "- DAILY (HTF) candle chart: NOT PROVIDED — use Daily Playbook text for context\n";
+      if (weeklyChartUrl) contextInfo += `- WEEKLY (HTF) candle chart: PROVIDED (${weeklyChartUrl})\n`;
+      else contextInfo += "- WEEKLY (HTF) candle chart: NOT PROVIDED — use Weekly Playbook JSON/text for context\n";
+      if (monthlyChartUrl) contextInfo += `- MONTHLY (HTF) candle chart: PROVIDED (${monthlyChartUrl})\n`;
+      else contextInfo += "- MONTHLY (HTF) candle chart: NOT PROVIDED — use Monthly Playbook JSON/text for context\n";
 
       if (contextStack.weekly) {
         const weeklyData = contextStack.weekly.playbookData as any;
@@ -2897,54 +2964,58 @@ ${playbookContext}`;
 
       const imageRefsForResponse = dayImages.map(img => ({
         filename: img.originalFilename,
-        path: img.storedPath,
+        path: normalizeUploadPath(img.storedPath),
         uploadedAt: img.uploadedAt ? new Date(img.uploadedAt).toISOString() : null,
         timestamp: img.uploadedAt ? new Date(img.uploadedAt).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" }) : "unknown",
         context: "",
         ai_critique: "",
+        is_critical: false,
       }));
 
       const chartImageParts: any[] = [];
-      const readFileAsBase64Part = (filePath: string, mimeType: string) => {
-        const absPath = path.join(process.cwd(), "public", filePath);
-        if (fs.existsSync(absPath)) {
-          const data = fs.readFileSync(absPath);
-          return { inlineData: { data: data.toString("base64"), mimeType } };
-        }
-        return null;
-      };
+      const bufferToInlinePart = (buffer: Buffer, mimeType: string) => ({
+        inlineData: { data: buffer.toString("base64"), mimeType }
+      });
 
-      if (dailyChartUrl && dailyChartFile) {
-        const dailyPart = readFileAsBase64Part(dailyChartUrl, dailyChartFile.mimetype);
-        if (dailyPart) chartImageParts.push({ text: "DAILY closing chart:" }, dailyPart);
+      // Intraday chart is always first — it is the primary Execution Tape
+      if (intradayChartUrl && intradayChartBuffer) {
+        chartImageParts.push({ text: "INTRADAY SESSION CHART (Primary — The Execution Tape):" }, bufferToInlinePart(intradayChartBuffer, intradayChartFile!.mimetype));
       }
-      if (weeklyChartUrl && weeklyChartFile) {
-        const weeklyPart = readFileAsBase64Part(weeklyChartUrl, weeklyChartFile.mimetype);
-        if (weeklyPart) chartImageParts.push({ text: "WEEKLY closing chart:" }, weeklyPart);
+      if (dailyChartUrl && dailyChartBuffer) {
+        chartImageParts.push({ text: "DAILY HTF candle chart (optional context):" }, bufferToInlinePart(dailyChartBuffer, dailyChartFile!.mimetype));
       }
-      if (monthlyChartUrl && monthlyChartFile) {
-        const monthlyPart = readFileAsBase64Part(monthlyChartUrl, monthlyChartFile.mimetype);
-        if (monthlyPart) chartImageParts.push({ text: "MONTHLY closing chart:" }, monthlyPart);
+      if (weeklyChartUrl && weeklyChartBuffer) {
+        chartImageParts.push({ text: "WEEKLY HTF candle chart (optional context):" }, bufferToInlinePart(weeklyChartBuffer, weeklyChartFile!.mimetype));
+      }
+      if (monthlyChartUrl && monthlyChartBuffer) {
+        chartImageParts.push({ text: "MONTHLY HTF candle chart (optional context):" }, bufferToInlinePart(monthlyChartBuffer, monthlyChartFile!.mimetype));
       }
 
-      const chartsAvailable = [dailyChartUrl ? "Daily" : null, weeklyChartUrl ? "Weekly" : null, monthlyChartUrl ? "Monthly" : null].filter(Boolean);
-      const allChartsPresent = chartsAvailable.length === 3;
-      const noCharts = chartsAvailable.length === 0;
+      const htfChartsAvailable = [dailyChartUrl ? "Daily" : null, weeklyChartUrl ? "Weekly" : null, monthlyChartUrl ? "Monthly" : null].filter(Boolean);
+      const hasHtfCharts = htfChartsAvailable.length > 0;
+      const noCharts = !hasIntradayChart && htfChartsAvailable.length === 0;
 
       let analysisMode = "";
-      if (allChartsPresent) {
-        analysisMode = `ANALYSIS MODE: FULL MACRO-TO-MICRO (all 3 charts provided)
-Perform the complete multi-timeframe synthesis:
-Step 1 (Daily): Compare the Daily close to the morning's Playbook scenarios. Which levels held? Which broke? Was the bias correct?
-Step 2 (Weekly): Analyze the Weekly candle from the chart image. Did it close as an 'Inside Week,' 'Engulfing,' or 'Pin Bar'? Explain how this affects next week's bias.
-Step 3 (Monthly): Check the Monthly levels from the chart image. Is the Monthly trend still intact or is a macro breakdown occurring?
-Final Output: Synthesize all three visual timeframes into the 'bigger_picture' section.`;
+      if (hasIntradayChart && hasHtfCharts) {
+        analysisMode = `ANALYSIS MODE: INTRADAY-FIRST WITH STRUCTURAL SHIFT (Intraday + HTF charts provided: ${htfChartsAvailable.join(", ")})
+PRIMARY ANALYSIS — The Execution Tape:
+  Analyze the Intraday Session Chart as your primary source of truth. Compare the price path tick-by-tick against the Morning Playbook. Identify exactly WHEN and WHERE each scenario was validated or invalidated (e.g., "The 10:00 AM rejection at 5922 confirmed the Bearish Bias early"). Be specific about entries, rejections, traps, and fills visible on the intraday chart.
+
+STRUCTURAL SHIFT ANALYSIS (HTF Context — extra credit):
+  After completing the intraday analysis, check the provided HTF charts. For each HTF chart available, answer: did today's intraday action change the higher-timeframe candle structure? Examples:
+  - "Today's drop turned the Monthly candle into a Bearish Engulfing"
+  - "The Daily candle closed as an Inside Bar — no structural damage"
+  Include this in the 'bigger_picture' section under weekly_impact / monthly_impact.`;
+      } else if (hasIntradayChart && !hasHtfCharts) {
+        analysisMode = `ANALYSIS MODE: INTRADAY-ONLY (only Intraday Session Chart provided)
+PRIMARY ANALYSIS — The Execution Tape:
+  Analyze the Intraday Session Chart as your sole visual source. Compare the price path against the Morning Playbook tick-by-tick. For HTF context (weekly_impact, monthly_impact), use the stored Playbook JSON/text data — note: "Visual HTF context was not provided; using playbook text data."`;
       } else if (noCharts) {
         analysisMode = `ANALYSIS MODE: CHAT-ONLY RECAP (no charts provided)
 Focus on the tactical chat history and playbook text. Summarize what was discussed, which levels were referenced, and what the trader's sentiment was. Use playbook JSON data for all timeframe analysis. Also generate the "chat_recap" field summarizing key Q&A exchanges from the chat log.`;
       } else {
-        analysisMode = `ANALYSIS MODE: ADAPTIVE (charts available: ${chartsAvailable.join(", ")})
-Focus on the ${chartsAvailable.join("/")} chart(s) provided. For missing timeframes, use the stored Playbook JSON/text to provide context. Note in your analysis: "Visual Weekly context was not provided" or "Visual Monthly context was not provided" where applicable. Still produce weekly_impact and monthly_impact using the playbook text data.`;
+        analysisMode = `ANALYSIS MODE: HTF-ONLY (HTF charts only: ${htfChartsAvailable.join(", ")} — no Intraday chart)
+Analyze the available HTF closing charts. For the intraday session narrative, use the tactical chat log and playbook scenarios as your primary session context. Note: "Visual Intraday context was not provided; session narrative derived from chat history."`;
       }
 
       const systemInstruction = `You are an Institutional Risk Manager and Trading Post-Mortem Analyst for ${ticker.symbol}. The market date is ${date} (New York time).
@@ -3005,16 +3076,23 @@ Your analysis MUST be returned as a JSON object with these exact fields:
   "lesson_of_the_day": "A key takeaway from today's session",
   "prep_for_tomorrow": "Key levels and scenarios to watch for the next session",
   "road_ahead": "Predict the next major battleground based on structure",
-  "image_references": [{"filename": "chart.png", "path": "/uploads/xyz.png", "timestamp": "10:30 AM", "context": "Brief description", "ai_critique": "Technical analysis"}],
+  "image_references": [{"filename": "chart.png", "path": "/uploads/xyz.png", "timestamp": "10:30 AM", "context": "Brief 2-sentence tactical narrative (only for Critical images)", "ai_critique": "Technical observation (only for Critical images)", "is_critical": true}],
   "chat_recap": [{"question": "key question from chat", "answer": "key answer or insight", "timestamp": "HH:MM AM/PM"}]
 }
 
+SIGNAL VS. NOISE — IMAGE CLASSIFICATION:
+For each uploaded image in the UPLOADED IMAGES section, you must classify it as Critical or Noise:
+- CRITICAL (is_critical: true): The image shows a level defense, a specific scenario trigger (LAAF/LBAF/failed reclaim), or a specific trade management decision. These are the key moments of the session.
+  → Generate a 2-sentence tactical narrative for "context" and a technical observation for "ai_critique".
+- NOISE (is_critical: false): The image is a routine screenshot, general market update, or does not show a specific actionable moment.
+  → Leave "context" and "ai_critique" as empty strings "". Do NOT generate descriptions for Noise images.
+
 RULES:
-1. Base your analysis ONLY on the provided playbook context, chat log, and closing chart images — do not invent data
+1. Base your analysis ONLY on the provided playbook context, chat log, and chart images — do not invent data
 2. If no playbook exists, grade plan adherence as "N/A" and note there was no morning plan
 3. Be specific about which levels held or broke, referencing exact prices from the playbook
 4. The grade should reflect how well the morning plan predicted actual market behavior
-5. If uploaded images are listed, include them in "image_references" with context and ai_critique
+5. Apply the Signal vs. Noise classification to every image in image_references — set is_critical to true or false for each
 6. The "road_ahead" field MUST reference specific price levels and structure
 7. If no Weekly Playbook exists, set blueprint_alignment.weekly.status to "no_data" with empty checked_events
 8. If no Monthly Playbook exists, set blueprint_alignment.monthly.status to "no_data" with empty checked_events
@@ -3054,7 +3132,12 @@ RULES:
           const modelRefs = Array.isArray(aiAnalysis.image_references) ? aiAnalysis.image_references : [];
           const mergedRefs = imageRefsForResponse.map(ref => {
             const match = modelRefs.find((mr: any) => mr.path === ref.path || mr.filename === ref.filename);
-            return match ? { ...ref, context: match.context || ref.context, ai_critique: match.ai_critique || ref.ai_critique } : ref;
+            return match ? {
+              ...ref,
+              context: match.context || ref.context,
+              ai_critique: match.ai_critique || ref.ai_critique,
+              is_critical: typeof match.is_critical === "boolean" ? match.is_critical : ref.is_critical,
+            } : ref;
           });
           aiAnalysis.image_references = mergedRefs;
           grade = aiAnalysis.plan_adherence?.grade || "N/A";
@@ -3127,12 +3210,13 @@ RULES:
         isFinalized: false,
         planAdherenceGrade: grade,
         closingBias: closingBias,
+        intradayChartUrl,
         dailyChartUrl,
         weeklyChartUrl,
         monthlyChartUrl,
       });
 
-      res.status(201).json(diary);
+      res.status(201).json(normalizeDiaryChartUrls(diary));
     } catch (err: any) {
       console.error("Diary generation error:", err);
       res.status(500).json({ message: err.message || "Failed to generate diary" });
@@ -3243,7 +3327,7 @@ RULES:
 
       const imageRefsForResponse = dayImages.map(img => ({
         filename: img.originalFilename,
-        path: img.storedPath,
+        path: normalizeUploadPath(img.storedPath),
         uploadedAt: img.uploadedAt ? new Date(img.uploadedAt).toISOString() : null,
         timestamp: img.uploadedAt ? new Date(img.uploadedAt).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" }) : "unknown",
         context: "",
@@ -3251,7 +3335,26 @@ RULES:
       }));
 
       const chartImageParts: any[] = [];
-      const readFileAsBase64Part = (filePath: string, mimeType: string) => {
+      const readFileAsBase64Part = async (filePath: string, mimeType: string) => {
+        // Internal GCS reference — download via authenticated GCS client
+        if (filePath.startsWith("gcs:")) {
+          const parsed = parseGcsRef(filePath);
+          if (!parsed) return null;
+          try {
+            const [data] = await objectStorageClient.bucket(parsed.bucketName).file(parsed.objectName).download();
+            return { inlineData: { data: (data as Buffer).toString("base64"), mimeType } };
+          } catch { return null; }
+        }
+        if (filePath.startsWith("http://") || filePath.startsWith("https://")) {
+          try {
+            const resp = await fetch(filePath);
+            if (resp.ok) {
+              const buf = Buffer.from(await resp.arrayBuffer());
+              return { inlineData: { data: buf.toString("base64"), mimeType } };
+            }
+          } catch {}
+          return null;
+        }
         const absPath = path.join(process.cwd(), "public", filePath);
         if (fs.existsSync(absPath)) {
           const data = fs.readFileSync(absPath);
@@ -3269,15 +3372,15 @@ RULES:
       };
 
       if (dailyChartUrl) {
-        const part = readFileAsBase64Part(dailyChartUrl, guessMime(dailyChartUrl));
+        const part = await readFileAsBase64Part(dailyChartUrl, guessMime(dailyChartUrl));
         if (part) chartImageParts.push({ text: "DAILY closing chart:" }, part);
       }
       if (weeklyChartUrl) {
-        const part = readFileAsBase64Part(weeklyChartUrl, guessMime(weeklyChartUrl));
+        const part = await readFileAsBase64Part(weeklyChartUrl, guessMime(weeklyChartUrl));
         if (part) chartImageParts.push({ text: "WEEKLY closing chart:" }, part);
       }
       if (monthlyChartUrl) {
-        const part = readFileAsBase64Part(monthlyChartUrl, guessMime(monthlyChartUrl));
+        const part = await readFileAsBase64Part(monthlyChartUrl, guessMime(monthlyChartUrl));
         if (part) chartImageParts.push({ text: "MONTHLY closing chart:" }, part);
       }
 
@@ -3372,7 +3475,12 @@ RULES:
           const modelRefs = Array.isArray(aiAnalysis.image_references) ? aiAnalysis.image_references : [];
           const mergedRefs = imageRefsForResponse.map(ref => {
             const match = modelRefs.find((mr: any) => mr.path === ref.path || mr.filename === ref.filename);
-            return match ? { ...ref, context: match.context || ref.context, ai_critique: match.ai_critique || ref.ai_critique } : ref;
+            return match ? {
+              ...ref,
+              context: match.context || ref.context,
+              ai_critique: match.ai_critique || ref.ai_critique,
+              is_critical: typeof match.is_critical === "boolean" ? match.is_critical : ref.is_critical,
+            } : ref;
           });
           aiAnalysis.image_references = mergedRefs;
           grade = aiAnalysis.plan_adherence?.grade || "N/A";
@@ -3425,7 +3533,7 @@ RULES:
         closingBias: closingBias,
       });
 
-      res.json(updated);
+      res.json(normalizeDiaryChartUrls(updated));
     } catch (err: any) {
       console.error("Diary regeneration error:", err);
       res.status(500).json({ message: err.message || "Failed to regenerate diary" });
@@ -3547,15 +3655,27 @@ Respond in plain text, no JSON or code blocks.`;
 
   app.get("/uploads/:filename", isAuthenticated, async (req, res) => {
     const userId = getUserId(res);
-    const filename = req.params.filename as string;
+    const filename = path.basename(req.params.filename as string);
     if (!filename || /[\/\\]/.test(filename)) {
       return res.status(400).json({ message: "Invalid filename" });
     }
     const storedPath = `/uploads/${filename}`;
+
+    // Check uploaded_images — stored_path may be https:// or /uploads/... 
     const allUserImages = await db.select().from(uploadedImages)
-      .where(and(eq(uploadedImages.userId, userId), eq(uploadedImages.storedPath, storedPath)))
+      .where(and(
+        eq(uploadedImages.userId, userId),
+        or(
+          eq(uploadedImages.storedPath, storedPath),
+          sql`${uploadedImages.storedPath} LIKE ${"%" + filename}`
+        )
+      ))
       .limit(1);
-    if (allUserImages.length === 0) {
+
+    let resolvedStoredPath: string | null = null;
+    if (allUserImages.length > 0) {
+      resolvedStoredPath = allUserImages[0].storedPath;
+    } else {
       const diaryCharts = await db.select().from(tradingDiary)
         .where(and(
           eq(tradingDiary.userId, userId),
@@ -3563,17 +3683,55 @@ Respond in plain text, no JSON or code blocks.`;
             eq(tradingDiary.dailyChartUrl, storedPath),
             eq(tradingDiary.weeklyChartUrl, storedPath),
             eq(tradingDiary.monthlyChartUrl, storedPath),
+            sql`${tradingDiary.dailyChartUrl} LIKE ${"%" + filename}`,
+            sql`${tradingDiary.weeklyChartUrl} LIKE ${"%" + filename}`,
+            sql`${tradingDiary.monthlyChartUrl} LIKE ${"%" + filename}`,
           )
         ))
         .limit(1);
       if (diaryCharts.length === 0) {
         return res.status(403).json({ message: "Access denied" });
       }
+      // Pick whichever chart URL matches
+      const d = diaryCharts[0];
+      resolvedStoredPath = [d.dailyChartUrl, d.weeklyChartUrl, d.monthlyChartUrl]
+        .find(u => u && u.includes(filename)) ?? storedPath;
     }
+
+    // If the stored path is an internal GCS reference, stream it through the backend
+    if (resolvedStoredPath && resolvedStoredPath.startsWith("gcs:")) {
+      const parsed = parseGcsRef(resolvedStoredPath);
+      if (!parsed) return res.status(500).json({ message: "Invalid GCS reference" });
+      try {
+        const bucket = objectStorageClient.bucket(parsed.bucketName);
+        const gcsFile = bucket.file(parsed.objectName);
+        const [meta] = await gcsFile.getMetadata();
+        res.setHeader("Content-Type", meta.contentType || "application/octet-stream");
+        if (meta.size) res.setHeader("Content-Length", String(meta.size));
+        res.setHeader("Cache-Control", "private, max-age=3600");
+        const stream = gcsFile.createReadStream();
+        stream.on("error", (err: any) => {
+          console.error("GCS stream error:", err);
+          if (!res.headersSent) res.status(500).json({ message: "Failed to stream file" });
+        });
+        return stream.pipe(res);
+      } catch (gcsErr: any) {
+        console.error("GCS serve error:", gcsErr);
+        return res.status(404).json({ message: "File not found in storage" });
+      }
+    }
+
+    // Legacy: redirect to absolute https:// URLs (e.g., from external storage)
+    if (resolvedStoredPath && (resolvedStoredPath.startsWith("http://") || resolvedStoredPath.startsWith("https://"))) {
+      return res.redirect(302, resolvedStoredPath);
+    }
+
+    // Fallback: serve from local disk (legacy paths before object storage migration)
     const filePath = path.join(process.cwd(), "public", "uploads", filename);
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ message: "File not found" });
     }
+    res.setHeader("Cache-Control", "public, max-age=604800, immutable");
     res.sendFile(filePath);
   });
 

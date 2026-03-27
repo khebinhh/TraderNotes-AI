@@ -197,3 +197,312 @@
   opacity: 0.5;
   animation: checklist-strike 0.3s ease-out forwards;
 }
+
+/* ─── Print / Save as PDF ─────────────────────────────────────────── */
+.print-header { display: none; }
+.print-footer { display: none; }
+.print-charts-all { display: none; }
+
+@media print {
+  /* ── 1. Reset page shell + unlock ALL viewport height locks ── */
+  html, body, #root {
+    height: auto !important;
+    min-height: unset !important;
+    max-height: none !important;
+    overflow: visible !important;
+    background: white !important;
+    background-color: white !important;
+    print-color-adjust: exact !important;
+    -webkit-print-color-adjust: exact !important;
+  }
+
+  /* ── 1b. Break ancestor layout/scroll traps BEFORE .print-region ── */
+  /* Target common dashboard shell patterns: ScrollArea roots, overflow-hidden wrappers, h-full/flex-1 containers */
+  [data-radix-scroll-area-viewport],
+  [class*="ScrollArea"],
+  [class*="overflow-hidden"],
+  [class*="h-full"],
+  [class*="h-screen"],
+  [class*="flex-1"],
+  [class*="min-h"],
+  [class*="max-h"] {
+    height: auto !important;
+    min-height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  /* ── 2. Global visibility reset — no color stripping here ── */
+  body * {
+    visibility: hidden;
+    box-shadow: none !important;
+    text-shadow: none !important;
+    filter: none !important;
+  }
+
+  /* ── 3. Centered 850px column — better paper utilization ── */
+  .print-region {
+    visibility: visible !important;
+    display: block !important;
+    width: 100% !important;
+    max-width: 850px !important;
+    margin: 0 auto !important;
+    height: auto !important;
+    overflow: visible !important;
+    padding: 24px !important;
+    background: white !important;
+    background-color: white !important;
+    color: #111827 !important;
+    print-color-adjust: exact !important;
+    -webkit-print-color-adjust: exact !important;
+  }
+
+  /* ── 4. Light Terminal theme for all children ── */
+  .print-region * {
+    visibility: visible !important;
+    height: auto !important;
+    overflow: visible !important;
+    max-width: 100% !important;
+    filter: none !important;
+    print-color-adjust: exact !important;
+    -webkit-print-color-adjust: exact !important;
+  }
+
+  /* ── 4b. Break scroll container traps ── */
+  .print-region [class*="scroll"],
+  .print-region [class*="ScrollArea"],
+  .print-region [data-radix-scroll-area-viewport] {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  /* ── 5. Remap dark backgrounds to Light Terminal equivalents ── */
+  .print-region [class*="bg-background"],
+  .print-region [class*="bg-card"],
+  .print-region [class*="bg-muted"],
+  .print-region [class*="bg-popover"] { background-color: #f8fafc !important; }
+  .print-region [class*="bg-black"] { background-color: #e5e7eb !important; }
+
+  /* ── 6. Text colors ── */
+  .print-region { color: #111827 !important; }
+  .print-region [class*="text-muted"] { color: #6b7280 !important; }
+  .print-region [class*="text-foreground"] { color: #111827 !important; }
+
+  /* ── 7. Accent colors preserved ── */
+  .print-region [class*="text-emerald"],
+  .print-region [class*="text-green"] { color: #15803d !important; }
+  .print-region [class*="text-red"] { color: #b91c1c !important; }
+  .print-region [class*="text-destructive"] { color: #b91c1c !important; }
+  .print-region [class*="text-amber"],
+  .print-region [class*="text-yellow"] { color: #92400e !important; }
+  .print-region [class*="text-blue"],
+  .print-region [class*="text-cyan"] { color: #1e40af !important; }
+  .print-region [class*="text-violet"],
+  .print-region [class*="text-purple"] { color: #5b21b6 !important; }
+  .print-region [class*="text-rose"] { color: #be123c !important; }
+
+  /* ── 8. Darker card borders (visible on white paper) ── */
+  .print-region [class*="border"] { border-color: #444 !important; }
+  /* Restore semantic colored borders */
+  .print-region [class*="border-emerald"] { border-color: #15803d !important; }
+  .print-region [class*="border-red"],
+  .print-region [class*="border-rose"]   { border-color: #b91c1c !important; }
+  .print-region [class*="border-amber"],
+  .print-region [class*="border-yellow"] { border-color: #92400e !important; }
+  .print-region [class*="border-blue"],
+  .print-region [class*="border-cyan"]   { border-color: #1e40af !important; }
+  .print-region [class*="border-violet"],
+  .print-region [class*="border-purple"] { border-color: #5b21b6 !important; }
+
+  /* ── 9. Professional two-column letterhead ── */
+  .print-header {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: baseline !important;
+    visibility: visible !important;
+    padding-bottom: 10px !important;
+    margin-bottom: 24px !important;
+    border-bottom: 2px solid #1f2937 !important;
+    background: transparent !important;
+    background-color: transparent !important;
+  }
+  .print-header-left {
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 13px !important;
+    font-weight: 800 !important;
+    letter-spacing: 0.12em !important;
+    color: #d97706 !important;
+  }
+  .print-header-right {
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 10px !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.06em !important;
+    color: #374151 !important;
+    text-align: right !important;
+  }
+
+  /* ── 10. Footer ── */
+  .print-footer {
+    display: block !important;
+    visibility: visible !important;
+    margin-top: 36px !important;
+    padding-top: 8px !important;
+    border-top: 1px solid #9ca3af !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 8px !important;
+    letter-spacing: 0.06em !important;
+    color: #9ca3af !important;
+    text-align: center !important;
+    background: transparent !important;
+    background-color: transparent !important;
+  }
+
+  /* ── 11. Hide interactive chrome + danger zone ── */
+  .print-region button,
+  .print-region [role="button"],
+  .print-region input,
+  .print-region textarea,
+  .print-region [data-testid*="button"],
+  .print-region [data-testid="section-danger-zone"],
+  .no-print {
+    display: none !important;
+    visibility: hidden !important;
+  }
+
+  /* ── 12. Force ALL collapsible/accordion sections fully open ── */
+  /* Target inline Framer Motion styles (height: 0, opacity: 0, overflow: hidden) */
+  .print-region [style*="height: 0"],
+  .print-region [style*="height:0"],
+  .print-region [style*="height: 0px"],
+  .print-region [style*="height:0px"] {
+    height: auto !important;
+    min-height: auto !important;
+    max-height: none !important;
+  }
+
+  .print-region [style*="opacity: 0"],
+  .print-region [style*="opacity:0"] {
+    opacity: 1 !important;
+  }
+
+  .print-region [style*="overflow: hidden"],
+  .print-region [style*="overflow:hidden"] {
+    overflow: visible !important;
+  }
+
+  /* Tailwind/utility classes for hiding */
+  .print-region .hidden,
+  .print-region [class*="hidden"] {
+    display: block !important;
+    visibility: visible !important;
+  }
+
+  /* Radix UI & generic collapsible patterns */
+  .print-region [data-state="closed"],
+  .print-region [data-state="collapsed"],
+  .print-region [aria-hidden="true"] {
+    display: block !important;
+    height: auto !important;
+    max-height: none !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+  }
+
+  /* AnimatePresence exit wrappers */
+  .print-region [data-framer-appear-id],
+  .print-region [data-projection-id] {
+    height: auto !important;
+    opacity: 1 !important;
+  }
+
+  /* ── 13. Structural Zones — force vertical stacking ── */
+  .print-region [data-testid="structural-zones"] {
+    display: block !important;
+  }
+  .print-region [data-testid="structural-zones"] > div {
+    display: block !important;
+    width: 100% !important;
+    margin-bottom: 16px !important;
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  /* ── 14. TabbedChartViewer — hide tab UI, show all charts stacked ── */
+  .print-region [data-testid="tabbed-chart-viewer"] > div:first-child,
+  .print-region [data-testid="tabbed-chart-viewer"] > div.p-2 {
+    display: none !important;
+    visibility: hidden !important;
+  }
+  .print-charts-all {
+    display: block !important;
+    visibility: visible !important;
+  }
+  .print-chart-item {
+    margin-bottom: 12px !important;
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+  .print-chart-label {
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 9px !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.08em !important;
+    color: #6b7280 !important;
+    text-transform: uppercase !important;
+    margin-bottom: 4px !important;
+  }
+  .print-charts-all img {
+    width: 100% !important;
+    height: auto !important;
+    border: 1px solid #d1d5db !important;
+    border-radius: 4px !important;
+  }
+
+  /* ── 15. Image optimization ── */
+  .print-region img {
+    max-width: 100% !important;
+    height: auto !important;
+    page-break-inside: avoid;
+    break-inside: avoid;
+    image-rendering: auto;
+  }
+
+  /* ── 16. Clean page breaks — prevent card slicing ── */
+  .print-region section,
+  .print-region [class*="rounded"],
+  .print-region [class*="border"] {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Specific card types that must never break */
+  .print-region [data-testid*="zone-card"],
+  .print-region [data-testid*="scenario"],
+  .print-region [data-testid*="card"],
+  .print-region [class*="risk"],
+  .print-region [class*="Card"] {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  /* Major sections need breathing room for page flow */
+  .print-region [data-testid*="section-"] {
+    margin-bottom: 2rem !important;
+  }
+
+  /* ── 16b. Section spacing for readability ── */
+  .print-region > * + * {
+    margin-top: 1.5rem !important;
+  }
+
+  /* Extra space between major collapsible sections */
+  .print-region [data-testid="section-structural-zones"],
+  .print-region [data-testid*="section-scenarios"],
+  .print-region [data-testid*="section-"] {
+    margin-bottom: 2rem !important;
+  }
+
+  /* ── 17. Page margins ── */
+  @page { margin: 1.5cm 1.8cm; }
+}

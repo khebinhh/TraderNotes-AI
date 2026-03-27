@@ -20,8 +20,8 @@ import {
   TrendingUp, TrendingDown, Minus, Award, BookOpen, ArrowRight,
   Lightbulb, Target, Shield, ShieldAlert, ChevronDown, ChevronRight,
   Lock, Pencil, Menu, Image, MessageCircle, Send, X, Upload,
-  Compass, Download, Columns2, GitCompare, AlertTriangle, Clock,
-  MessageSquare, Calendar, RefreshCw,
+  Compass, Printer, Columns2, GitCompare, AlertTriangle, Clock,
+  MessageSquare, Calendar, RefreshCw, ImageOff, ZoomIn, FileDown,
 } from "lucide-react";
 import { format, parseISO } from "date-fns";
 import {
@@ -123,6 +123,7 @@ function CollapsiblePillar({ title, icon, defaultOpen = true, children, accentCo
 }
 
 const chartColorMap: Record<string, { active: string; idle: string }> = {
+  amber: { active: "border-amber-500/50 bg-amber-500/5", idle: "border-border hover:border-muted-foreground/40" },
   emerald: { active: "border-emerald-500/50 bg-emerald-500/5", idle: "border-border hover:border-muted-foreground/40" },
   blue: { active: "border-blue-500/50 bg-blue-500/5", idle: "border-border hover:border-muted-foreground/40" },
   violet: { active: "border-violet-500/50 bg-violet-500/5", idle: "border-border hover:border-muted-foreground/40" },
@@ -196,49 +197,118 @@ function ChartUploadSlot({ label, sublabel, file, onFileChange, required, color 
   );
 }
 
-function TabbedChartViewer({ entry }: { entry: DiaryEntry }) {
-  const [activeTab, setActiveTab] = useState<"daily" | "weekly" | "monthly">("daily");
-  const tabs = [
-    { key: "daily" as const, label: "Daily", url: entry.dailyChartUrl, color: "text-emerald-400 border-emerald-400" },
-    { key: "weekly" as const, label: "Weekly", url: entry.weeklyChartUrl, color: "text-blue-400 border-blue-400" },
-    { key: "monthly" as const, label: "Monthly", url: entry.monthlyChartUrl, color: "text-violet-400 border-violet-400" },
+function TabbedChartViewer({ entry, onImageClick }: { entry: DiaryEntry; onImageClick?: (src: string, alt: string) => void }) {
+  const [activeHtfTab, setActiveHtfTab] = useState<"daily" | "weekly" | "monthly">("daily");
+  const [brokenUrls, setBrokenUrls] = useState<Set<string>>(new Set());
+
+  const htfTabs = [
+    { key: "daily" as const, label: "1D", url: entry.dailyChartUrl, color: "text-emerald-400 border-emerald-400" },
+    { key: "weekly" as const, label: "1W", url: entry.weeklyChartUrl, color: "text-blue-400 border-blue-400" },
+    { key: "monthly" as const, label: "1M", url: entry.monthlyChartUrl, color: "text-violet-400 border-violet-400" },
   ].filter(t => t.url);
 
-  if (tabs.length === 0) return null;
+  const hasIntraday = !!entry.intradayChartUrl;
+  const hasHtf = htfTabs.length > 0;
 
-  const activeUrl = tabs.find(t => t.key === activeTab)?.url || tabs[0]?.url;
+  if (!hasIntraday && !hasHtf) return null;
+
+  const htfActiveUrl = htfTabs.find(t => t.key === activeHtfTab)?.url || htfTabs[0]?.url;
 
   return (
-    <div className="border border-border rounded-lg overflow-hidden bg-card/30" data-testid="tabbed-chart-viewer">
-      <div className="flex border-b border-border bg-muted/20">
-        {tabs.map(tab => (
-          <button
-            key={tab.key}
-            onClick={() => setActiveTab(tab.key)}
-            className={cn(
-              "flex-1 px-3 py-2 text-xs font-bold font-mono uppercase tracking-wide transition-all border-b-2",
-              activeTab === tab.key ? tab.color : "text-muted-foreground border-transparent hover:text-foreground"
+    <div className="space-y-3" data-testid="tabbed-chart-viewer">
+      {/* Primary: Intraday Execution Tape */}
+      {hasIntraday && (
+        <div className="border border-amber-500/30 rounded-lg overflow-hidden bg-card/30">
+          <div className="flex items-center gap-2 px-3 py-2 bg-amber-500/5 border-b border-amber-500/20">
+            <div className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+            <span className="text-[10px] font-bold font-mono uppercase tracking-widest text-amber-400">Execution Tape — Intraday Session</span>
+          </div>
+          <div className="p-2 bg-black/20">
+            {brokenUrls.has(entry.intradayChartUrl!) ? (
+              <div className="flex flex-col items-center justify-center py-12 text-muted-foreground gap-2">
+                <ImageOff className="h-8 w-8 opacity-40" />
+                <span className="text-xs font-mono">Image Missing</span>
+              </div>
+            ) : (
+              <img
+                src={entry.intradayChartUrl!}
+                alt="Intraday session chart"
+                className="w-full max-h-[500px] object-contain rounded cursor-pointer hover:opacity-90 transition-opacity"
+                data-testid="img-chart-intraday"
+                onClick={() => onImageClick?.(entry.intradayChartUrl!, "Intraday session chart")}
+                onError={() => setBrokenUrls(prev => new Set(prev).add(entry.intradayChartUrl!))}
+              />
             )}
-            data-testid={`tab-chart-${tab.key}`}
-          >
-            {tab.label}
-          </button>
+          </div>
+        </div>
+      )}
+      {/* Secondary: HTF Context */}
+      {hasHtf && (
+        <div className="border border-border rounded-lg overflow-hidden bg-card/30">
+          <div className="flex items-center border-b border-border bg-muted/20">
+            <span className="text-[9px] font-mono text-muted-foreground uppercase tracking-widest px-3 py-1.5 border-r border-border shrink-0">HTF Context</span>
+            {htfTabs.map(tab => (
+              <button
+                key={tab.key}
+                onClick={() => setActiveHtfTab(tab.key)}
+                className={cn(
+                  "flex-1 px-3 py-1.5 text-[10px] font-bold font-mono uppercase tracking-wide transition-all border-b-2",
+                  activeHtfTab === tab.key ? tab.color : "text-muted-foreground border-transparent hover:text-foreground"
+                )}
+                data-testid={`tab-chart-${tab.key}`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+          <div className="p-2 bg-black/20">
+            {htfActiveUrl && brokenUrls.has(htfActiveUrl) ? (
+              <div className="flex flex-col items-center justify-center py-8 text-muted-foreground gap-2">
+                <ImageOff className="h-6 w-6 opacity-40" />
+                <span className="text-xs font-mono">Image Missing</span>
+              </div>
+            ) : (
+              <img
+                src={htfActiveUrl!}
+                alt={`${activeHtfTab} closing candle`}
+                className="w-full max-h-[280px] object-contain rounded cursor-pointer hover:opacity-90 transition-opacity"
+                data-testid={`img-chart-${activeHtfTab}`}
+                onClick={() => htfActiveUrl && onImageClick?.(htfActiveUrl, `${activeHtfTab} closing candle`)}
+                onError={() => { if (htfActiveUrl) setBrokenUrls(prev => new Set(prev).add(htfActiveUrl)); }}
+              />
+            )}
+          </div>
+        </div>
+      )}
+      {/* Print-only: all charts stacked */}
+      <div className="print-charts-all">
+        {hasIntraday && (
+          <div className="print-chart-item">
+            <div className="print-chart-label">Intraday Session Chart</div>
+            {!brokenUrls.has(entry.intradayChartUrl!) ? (
+              <img src={entry.intradayChartUrl!} alt="Intraday chart" style={{ width: "100%" }} />
+            ) : (
+              <div style={{ padding: "8px", color: "#9ca3af", fontSize: "10px" }}>Image Missing</div>
+            )}
+          </div>
+        )}
+        {htfTabs.map(tab => (
+          <div key={tab.key} className="print-chart-item">
+            <div className="print-chart-label">{tab.key === "daily" ? "1D" : tab.key === "weekly" ? "1W" : "1M"} Candle Chart</div>
+            {!brokenUrls.has(tab.url!) ? (
+              <img src={tab.url!} alt={`${tab.label} closing candle`} style={{ width: "100%" }} />
+            ) : (
+              <div style={{ padding: "8px", color: "#9ca3af", fontSize: "10px" }}>Image Missing</div>
+            )}
+          </div>
         ))}
-      </div>
-      <div className="p-2 bg-black/20">
-        <img
-          src={activeUrl!}
-          alt={`${activeTab} closing chart`}
-          className="w-full max-h-[400px] object-contain rounded"
-          data-testid={`img-chart-${activeTab}`}
-        />
       </div>
     </div>
   );
 }
 
-function CompareModal({ dailyChartUrl, morningThesis, planAdherence, open, onClose }: {
-  dailyChartUrl: string;
+function CompareModal({ intradayChartUrl, morningThesis, planAdherence, open, onClose }: {
+  intradayChartUrl: string;
   morningThesis: string | null;
   planAdherence: DiaryAnalysis["plan_adherence"] | null;
   open: boolean;
@@ -253,7 +323,7 @@ function CompareModal({ dailyChartUrl, morningThesis, planAdherence, open, onClo
             Plan vs. Reality
           </DialogTitle>
           <DialogDescription className="text-xs text-muted-foreground">
-            Morning playbook thesis and predicted levels vs. actual daily closing chart
+            Morning playbook thesis and predicted levels vs. the intraday execution tape
           </DialogDescription>
         </DialogHeader>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -292,9 +362,14 @@ function CompareModal({ dailyChartUrl, morningThesis, planAdherence, open, onClo
             )}
           </div>
           <div className="space-y-2">
-            <span className="text-[10px] font-mono text-emerald-400 uppercase font-bold">Actual Daily Close</span>
-            <div className="bg-black/20 rounded-lg overflow-hidden border border-emerald-500/20">
-              <img src={dailyChartUrl} alt="Daily closing chart" className="w-full object-contain" />
+            <span className="text-[10px] font-mono text-amber-400 uppercase font-bold">Execution Tape — Intraday Session</span>
+            <div className="bg-black/20 rounded-lg overflow-hidden border border-amber-500/20">
+              <img
+                src={intradayChartUrl}
+                alt="Intraday session chart"
+                className="w-full object-contain"
+                onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+              />
             </div>
           </div>
         </div>
@@ -308,24 +383,83 @@ function getNYDateStr() {
   return `${nowNY.getFullYear()}-${String(nowNY.getMonth() + 1).padStart(2, "0")}-${String(nowNY.getDate()).padStart(2, "0")}`;
 }
 
-async function generatePdf(element: HTMLElement, title: string) {
-  const { default: jsPDF } = await import("jspdf");
-  const { default: html2canvas } = await import("html2canvas");
-  const images = Array.from(element.querySelectorAll("img"));
-  await Promise.all(images.map((img) => img.complete ? Promise.resolve() : img.decode().catch(() => {})));
-  const canvas = await html2canvas(element, { backgroundColor: "#0a0a0f", scale: 2, useCORS: true, allowTaint: false, logging: false });
-  const imgData = canvas.toDataURL("image/png");
-  const pdf = new jsPDF({ orientation: canvas.width > canvas.height ? "landscape" : "portrait", unit: "px", format: [canvas.width, canvas.height] });
-  pdf.addImage(imgData, "PNG", 0, 0, canvas.width, canvas.height);
-  const blob = pdf.output("blob");
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `${title}.pdf`;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+function TimelineImageCard({ img, index, onImageClick }: {
+  img: { filename: string; path: string; context?: string; uploadedAt?: string; timestamp?: string; ai_critique?: string; is_critical?: boolean };
+  index: number;
+  onImageClick: (src: string, alt: string) => void;
+}) {
+  const [isBroken, setIsBroken] = useState(false);
+  return (
+    <div className="relative pl-6 border-l-2 border-cyan-500/30" data-testid={`timeline-moment-${index}`}>
+      <div className="absolute left-[-5px] top-2 w-2.5 h-2.5 rounded-full bg-cyan-400 border-2 border-background" />
+      <div className="flex items-center gap-2 mb-2">
+        <Badge className="text-[9px] bg-cyan-500/10 text-cyan-400 border-cyan-500/30 font-mono">
+          {img.timestamp || img.uploadedAt?.split("T")[1]?.slice(0, 5) || "—"}
+        </Badge>
+        <span className="text-[10px] font-mono text-muted-foreground truncate" title={img.filename}>
+          {img.filename}
+        </span>
+      </div>
+      <div className="border border-border/50 rounded-lg overflow-hidden bg-muted/10">
+        <div className="aspect-video bg-black/20 relative group">
+          {isBroken ? (
+            <div className="absolute inset-0 flex flex-col items-center justify-center text-muted-foreground gap-1">
+              <ImageOff className="h-6 w-6 opacity-40" />
+              <span className="text-[10px] font-mono">Image Missing</span>
+            </div>
+          ) : (
+            <>
+              <img
+                src={img.path}
+                alt={img.filename}
+                className="w-full h-full max-h-[400px] object-contain cursor-pointer"
+                loading="lazy"
+                data-testid={`img-visual-proof-${index}`}
+                onClick={() => onImageClick(img.path, img.filename)}
+                onError={() => setIsBroken(true)}
+              />
+              <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                <ZoomIn className="h-6 w-6 text-white/70 drop-shadow-lg" />
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+      {img.is_critical !== false && (img.context || img.ai_critique) && (
+        <div className="mt-2 bg-cyan-500/5 border border-cyan-500/10 rounded-md p-2.5">
+          {img.context && (
+            <p className="text-[11px] text-foreground/70 mb-1">{img.context}</p>
+          )}
+          {img.ai_critique && (
+            <p className="text-[11px] text-cyan-300/80 italic" data-testid={`text-ai-critique-${index}`}>
+              {img.ai_critique}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ImageLightbox({ src, alt, open, onClose }: { src: string; alt: string; open: boolean; onClose: () => void }) {
+  if (!open) return null;
+  return (
+    <Dialog open={open} onOpenChange={onClose}>
+      <DialogContent className="bg-black/95 border-border max-w-[95vw] max-h-[95vh] p-2">
+        <DialogHeader className="sr-only">
+          <DialogTitle>{alt}</DialogTitle>
+          <DialogDescription>Enlarged image view</DialogDescription>
+        </DialogHeader>
+        <img
+          src={src}
+          alt={alt}
+          className="w-full h-full max-h-[85vh] object-contain rounded"
+          data-testid="img-lightbox"
+        />
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 interface DiaryViewProps {
@@ -340,6 +474,7 @@ export function DiaryView({ activeTicker }: DiaryViewProps) {
   const [showFinalizeModal, setShowFinalizeModal] = useState(false);
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [showCompareModal, setShowCompareModal] = useState(false);
+  const [lightboxSrc, setLightboxSrc] = useState<{ src: string; alt: string } | null>(null);
   const [chatMessages, setChatMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatOpen, setChatOpen] = useState(false);
@@ -349,6 +484,7 @@ export function DiaryView({ activeTicker }: DiaryViewProps) {
   const { toast } = useToast();
   const isMobile = useIsMobile();
 
+  const [intradayChart, setIntradayChart] = useState<File | null>(null);
   const [dailyChart, setDailyChart] = useState<File | null>(null);
   const [weeklyChart, setWeeklyChart] = useState<File | null>(null);
   const [monthlyChart, setMonthlyChart] = useState<File | null>(null);
@@ -417,6 +553,7 @@ export function DiaryView({ activeTicker }: DiaryViewProps) {
     mutationFn: () => {
       const dateToUse = selectedDate || getNYDateStr();
       return generateDiary(activeTicker!.id, dateToUse, {
+        intraday: intradayChart || undefined,
         daily: dailyChart || undefined,
         weekly: weeklyChart || undefined,
         monthly: monthlyChart || undefined,
@@ -425,12 +562,17 @@ export function DiaryView({ activeTicker }: DiaryViewProps) {
     onMutate: () => {
       setShowUploadModal(false);
       clearGenTimers();
-      const hasCharts = !!(dailyChart || weeklyChart || monthlyChart);
+      const hasIntraday = !!intradayChart;
+      const hasCharts = !!(intradayChart || dailyChart || weeklyChart || monthlyChart);
       setGenProgress(hasCharts ? "Uploading charts..." : "Analyzing chat history...");
-      if (hasCharts) {
-        genTimersRef.current.push(setTimeout(() => setGenProgress("Reviewing Daily structure..."), 2000));
+      if (hasIntraday) {
+        genTimersRef.current.push(setTimeout(() => setGenProgress("Reading Execution Tape..."), 2000));
         genTimersRef.current.push(setTimeout(() => setGenProgress("Running Blueprint Alignment Audit..."), 5000));
-        genTimersRef.current.push(setTimeout(() => setGenProgress("Synthesizing multi-timeframe analysis..."), 8000));
+        genTimersRef.current.push(setTimeout(() => setGenProgress("Synthesizing Settlement Audit..."), 8000));
+      } else if (hasCharts) {
+        genTimersRef.current.push(setTimeout(() => setGenProgress("Reviewing HTF candle structure..."), 2000));
+        genTimersRef.current.push(setTimeout(() => setGenProgress("Running Blueprint Alignment Audit..."), 5000));
+        genTimersRef.current.push(setTimeout(() => setGenProgress("Generating post-mortem..."), 8000));
       } else {
         genTimersRef.current.push(setTimeout(() => setGenProgress("Building Chat Recap..."), 2000));
         genTimersRef.current.push(setTimeout(() => setGenProgress("Running Blueprint Alignment Audit..."), 5000));
@@ -440,12 +582,13 @@ export function DiaryView({ activeTicker }: DiaryViewProps) {
     onSuccess: (entry) => {
       clearGenTimers();
       setGenProgress(null);
+      setIntradayChart(null);
       setDailyChart(null);
       setWeeklyChart(null);
       setMonthlyChart(null);
       queryClient.invalidateQueries({ queryKey: ["/api/tickers", activeTicker?.id, "diary"] });
       setSelectedDiaryId(entry.id);
-      toast({ title: "Diary Generated", description: `Multi-timeframe post-mortem for ${entry.date} created` });
+      toast({ title: "Diary Generated", description: `Settlement Audit for ${entry.date} created` });
     },
     onError: (err: Error) => {
       clearGenTimers();
@@ -532,16 +675,56 @@ export function DiaryView({ activeTicker }: DiaryViewProps) {
   };
 
   const hasActivityChat = dateCheck ? dateCheck.hasChat : hasDateChat;
-  const hasAnyChart = !!(dailyChart || weeklyChart || monthlyChart);
-  const canGenerate = hasAnyChart || hasActivityChat;
+  const hasIntradayChart = !!intradayChart;
+  const hasAnyChart = !!(intradayChart || dailyChart || weeklyChart || monthlyChart);
+  // Intraday chart OR chat history required — HTF-only uploads are not sufficient
+  const canGenerate = hasIntradayChart || hasActivityChat;
 
-  const handleDownloadPdf = async () => {
-    if (!reportRef.current || !selectedEntry) return;
+  const handlePrint = () => {
+    const ticker = activeTicker?.symbol || "Ticker";
+    const date = selectedEntry?.date || new Date().toISOString().split("T")[0];
+    const originalTitle = document.title;
+    document.title = `TraderNotes_Diary_${ticker}_${date}`;
+    window.print();
+    document.title = originalTitle;
+  };
+
+  const [isExportingPDF, setIsExportingPDF] = useState(false);
+
+  const handleExportPDF = async () => {
+    if (!reportRef.current || isExportingPDF) return;
+    setIsExportingPDF(true);
     try {
-      await generatePdf(reportRef.current, `diary-${selectedEntry.date}`);
-      toast({ title: "PDF Downloaded" });
-    } catch {
-      toast({ title: "PDF Failed", description: "Could not generate PDF", variant: "destructive" });
+      const { default: jsPDF } = await import("jspdf");
+      const { default: html2canvas } = await import("html2canvas");
+      const ticker = activeTicker?.symbol || "Ticker";
+      const date = selectedEntry?.date || new Date().toISOString().split("T")[0];
+      const canvas = await html2canvas(reportRef.current, {
+        scale: 2,
+        useCORS: true,
+        allowTaint: true,
+        backgroundColor: "#0D0D0D",
+        logging: false,
+      });
+      const imgData = canvas.toDataURL("image/png");
+      const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const imgWidth = pageWidth;
+      const imgHeight = (canvas.height * imgWidth) / canvas.width;
+      let yOffset = 0;
+      let remaining = imgHeight;
+      while (remaining > 0) {
+        if (yOffset > 0) pdf.addPage();
+        pdf.addImage(imgData, "PNG", 0, -yOffset, imgWidth, imgHeight);
+        yOffset += pageHeight;
+        remaining -= pageHeight;
+      }
+      pdf.save(`TraderNotes_Diary_${ticker}_${date}.pdf`);
+    } catch (err) {
+      console.error("PDF export error:", err);
+    } finally {
+      setIsExportingPDF(false);
     }
   };
 
@@ -732,7 +915,13 @@ export function DiaryView({ activeTicker }: DiaryViewProps) {
               </div>
             </div>
           ) : !genProgress && selectedEntry ? (
-            <div className="max-w-3xl mx-auto p-4 md:p-6 space-y-4" ref={reportRef}>
+            <div className="max-w-3xl mx-auto p-4 md:p-6 space-y-4 relative print-region" ref={reportRef}>
+              <div className="print-header">
+                <span className="print-header-left">TRADERNOTES AI</span>
+                <span className="print-header-right">
+                  {[activeTicker?.symbol, selectedEntry?.date].filter(Boolean).join(" | ")}
+                </span>
+              </div>
               <div className="flex items-center justify-between">
                 <div>
                   <h2 className="text-lg font-bold font-mono" data-testid="text-diary-date">
@@ -765,10 +954,10 @@ export function DiaryView({ activeTicker }: DiaryViewProps) {
                 )}
               </div>
 
-              {(selectedEntry.dailyChartUrl || selectedEntry.weeklyChartUrl || selectedEntry.monthlyChartUrl) && (
+              {(selectedEntry.intradayChartUrl || selectedEntry.dailyChartUrl || selectedEntry.weeklyChartUrl || selectedEntry.monthlyChartUrl) && (
                 <div className="space-y-2">
-                  <TabbedChartViewer entry={selectedEntry} />
-                  {selectedEntry.dailyChartUrl && (
+                  <TabbedChartViewer entry={selectedEntry} onImageClick={(src, alt) => setLightboxSrc({ src, alt })} />
+                  {(selectedEntry.intradayChartUrl || selectedEntry.dailyChartUrl) && (
                     <div className="flex justify-end">
                       <Button
                         variant="outline"
@@ -926,40 +1115,12 @@ export function DiaryView({ activeTicker }: DiaryViewProps) {
                     >
                       <div className="space-y-4">
                         {analysis.image_references.map((img, i) => (
-                          <div key={i} className="relative pl-6 border-l-2 border-cyan-500/30" data-testid={`timeline-moment-${i}`}>
-                            <div className="absolute left-[-5px] top-2 w-2.5 h-2.5 rounded-full bg-cyan-400 border-2 border-background" />
-                            <div className="flex items-center gap-2 mb-2">
-                              <Badge className="text-[9px] bg-cyan-500/10 text-cyan-400 border-cyan-500/30 font-mono">
-                                {img.timestamp || img.uploadedAt?.split("T")[1]?.slice(0, 5) || "—"}
-                              </Badge>
-                              <span className="text-[10px] font-mono text-muted-foreground truncate" title={img.filename}>
-                                {img.filename}
-                              </span>
-                            </div>
-                            <div className="border border-border/50 rounded-lg overflow-hidden bg-muted/10">
-                              <div className="aspect-video bg-black/20 relative">
-                                <img
-                                  src={img.path}
-                                  alt={img.filename}
-                                  className="w-full h-full object-contain"
-                                  loading="lazy"
-                                  data-testid={`img-visual-proof-${i}`}
-                                />
-                              </div>
-                            </div>
-                            {(img.context || img.ai_critique) && (
-                              <div className="mt-2 bg-cyan-500/5 border border-cyan-500/10 rounded-md p-2.5">
-                                {img.context && (
-                                  <p className="text-[11px] text-foreground/70 mb-1">{img.context}</p>
-                                )}
-                                {img.ai_critique && (
-                                  <p className="text-[11px] text-cyan-300/80 italic" data-testid={`text-ai-critique-${i}`}>
-                                    {img.ai_critique}
-                                  </p>
-                                )}
-                              </div>
-                            )}
-                          </div>
+                          <TimelineImageCard
+                            key={i}
+                            img={img}
+                            index={i}
+                            onImageClick={(src, alt) => setLightboxSrc({ src, alt })}
+                          />
                         ))}
                       </div>
                     </CollapsiblePillar>
@@ -1284,17 +1445,36 @@ export function DiaryView({ activeTicker }: DiaryViewProps) {
                 </div>
               )}
 
-              <div className="flex justify-center pt-2 pb-4">
+              <div className="flex justify-center gap-2 pt-2 pb-4">
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={handleDownloadPdf}
-                  className="font-mono text-xs tracking-wide border-muted-foreground/30 text-muted-foreground hover:text-foreground"
-                  data-testid="button-download-diary-pdf"
+                  onClick={handlePrint}
+                  className="font-mono text-xs tracking-wide border-muted-foreground/30 text-muted-foreground hover:text-foreground no-print"
+                  data-testid="button-print-diary"
                 >
-                  <Download className="h-3.5 w-3.5 mr-1.5 shrink-0" />
-                  DOWNLOAD AS PDF
+                  <Printer className="h-3.5 w-3.5 mr-1.5 shrink-0" />
+                  PRINT
                 </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleExportPDF}
+                  disabled={isExportingPDF}
+                  className="font-mono text-xs tracking-wide border-amber-500/30 text-amber-400 hover:text-amber-300 hover:border-amber-400/50 no-print"
+                  data-testid="button-export-pdf-diary"
+                >
+                  {isExportingPDF ? (
+                    <Loader2 className="h-3.5 w-3.5 mr-1.5 shrink-0 animate-spin" />
+                  ) : (
+                    <FileDown className="h-3.5 w-3.5 mr-1.5 shrink-0" />
+                  )}
+                  {isExportingPDF ? "EXPORTING..." : "DOWNLOAD PDF"}
+                </Button>
+              </div>
+
+              <div className="print-footer">
+                Confidential Trading Logic — Generated by TraderNotes AI.
               </div>
             </div>
           ) : null}
@@ -1306,10 +1486,10 @@ export function DiaryView({ activeTicker }: DiaryViewProps) {
           <DialogHeader>
             <DialogTitle className="font-mono text-base flex items-center gap-2">
               <Upload className="h-4 w-4 text-amber-400" />
-              Upload Closing Charts
+              Settlement Audit — Upload Charts
             </DialogTitle>
             <DialogDescription className="text-xs text-muted-foreground">
-              Upload closing charts for post-mortem analysis. Any chart combination works — Daily, Weekly, and Monthly each add depth to the analysis.
+              Drop your Intraday session chart (required) to generate the Execution Tape audit. HTF candle charts are optional macro context.
             </DialogDescription>
           </DialogHeader>
           <div className="flex items-center gap-3 bg-muted/30 rounded-lg px-3 py-2 border border-border/50">
@@ -1327,24 +1507,34 @@ export function DiaryView({ activeTicker }: DiaryViewProps) {
               />
             </div>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {/* Slot 1: Intraday — full width, mandatory */}
+          <ChartUploadSlot
+            label="Intraday Session Chart"
+            sublabel="RTH/ETH — 1m, 5m, or 15m view"
+            file={intradayChart}
+            onFileChange={setIntradayChart}
+            required
+            color="amber"
+          />
+          {/* Slots 2-4: HTF optional context — 3 columns */}
+          <div className="grid grid-cols-3 gap-2">
             <ChartUploadSlot
-              label="Daily Chart Close"
-              sublabel="Capturing the RTH range"
+              label="1-Day Summary"
+              sublabel="HTF: Daily Candle"
               file={dailyChart}
               onFileChange={setDailyChart}
               color="emerald"
             />
             <ChartUploadSlot
-              label="Weekly (Optional)"
-              sublabel="5-day candle structure"
+              label="1-Week Summary"
+              sublabel="HTF: Weekly Candle"
               file={weeklyChart}
               onFileChange={setWeeklyChart}
               color="blue"
             />
             <ChartUploadSlot
-              label="Monthly (Optional)"
-              sublabel="Macro trend context"
+              label="1-Month Summary"
+              sublabel="HTF: Monthly Candle"
               file={monthlyChart}
               onFileChange={setMonthlyChart}
               color="violet"
@@ -1355,14 +1545,9 @@ export function DiaryView({ activeTicker }: DiaryViewProps) {
               A diary entry already exists for this date — generating will return the existing entry
             </p>
           )}
-          {dateCheck && !dateCheck.hasExistingEntry && !dateCheck.hasPlaybook && !dateCheck.hasChat && !hasAnyChart && (
+          {!canGenerate && (
             <p className="text-[10px] text-amber-400/80 font-mono text-center" data-testid="text-no-activity-warning">
-              No activity recorded for this date. You can still upload charts for a visual-only analysis.
-            </p>
-          )}
-          {!canGenerate && !(dateCheck && !dateCheck.hasExistingEntry && !dateCheck.hasPlaybook && !dateCheck.hasChat && !hasAnyChart) && (
-            <p className="text-[10px] text-amber-400/80 font-mono text-center">
-              Upload a chart or have tactical chat history for this date to generate
+              Upload an Intraday chart or have tactical chat history for this date to generate
             </p>
           )}
           {canGenerate && !hasAnyChart && hasActivityChat && (
@@ -1370,9 +1555,14 @@ export function DiaryView({ activeTicker }: DiaryViewProps) {
               Chat history detected — a Chat Recap diary will be generated
             </p>
           )}
-          {canGenerate && hasAnyChart && (
+          {canGenerate && hasIntradayChart && (
             <p className="text-[10px] text-emerald-400/80 font-mono text-center">
-              {dateCheck?.hasPlaybook ? "Ready to generate with playbook context" : dateCheck?.hasChat ? "Ready to generate with chart + chat context" : "Ready to generate — visual-only analysis"}
+              {dateCheck?.hasPlaybook ? "Ready — Execution Tape audit with playbook context" : dateCheck?.hasChat ? "Ready — Execution Tape audit with chat context" : "Ready — visual Execution Tape audit"}
+            </p>
+          )}
+          {canGenerate && hasAnyChart && !hasIntradayChart && (
+            <p className="text-[10px] text-emerald-400/80 font-mono text-center">
+              {dateCheck?.hasPlaybook ? "Ready to generate with HTF + playbook context" : "Ready — HTF candle analysis"}
             </p>
           )}
           <DialogFooter className="gap-2">
@@ -1431,15 +1621,22 @@ export function DiaryView({ activeTicker }: DiaryViewProps) {
         </DialogContent>
       </Dialog>
 
-      {selectedEntry?.dailyChartUrl && (
+      {(selectedEntry?.intradayChartUrl || selectedEntry?.dailyChartUrl) && (
         <CompareModal
-          dailyChartUrl={selectedEntry.dailyChartUrl}
+          intradayChartUrl={selectedEntry.intradayChartUrl || selectedEntry.dailyChartUrl!}
           morningThesis={morningThesis}
           planAdherence={analysis?.plan_adherence || null}
           open={showCompareModal}
           onClose={() => setShowCompareModal(false)}
         />
       )}
+
+      <ImageLightbox
+        src={lightboxSrc?.src || ""}
+        alt={lightboxSrc?.alt || ""}
+        open={!!lightboxSrc}
+        onClose={() => setLightboxSrc(null)}
+      />
     </div>
   );
 }

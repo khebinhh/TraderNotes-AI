@@ -7,6 +7,7 @@ import { sessionMiddleware, registerAuthRoutes } from "./auth";
 const app = express();
 const httpServer = createServer(app);
 
+
 declare module "http" {
   interface IncomingMessage {
     rawBody: unknown;

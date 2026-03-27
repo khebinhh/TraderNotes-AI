@@ -1,4 +1,22 @@
 import { apiRequest } from "./queryClient";
+import imageCompression from "browser-image-compression";
+
+// Compress an image file to WebP before upload — reduces bandwidth, keeps quality high
+async function compressImageFile(file: File): Promise<File> {
+  if (!file.type.startsWith("image/")) return file;
+  try {
+    const compressed = await imageCompression(file, {
+      maxSizeMB: 1.5,
+      maxWidthOrHeight: 2560,
+      useWebWorker: true,
+      fileType: "image/webp",
+      initialQuality: 0.85,
+    });
+    return new File([compressed], file.name.replace(/\.[^.]+$/, ".webp"), { type: "image/webp" });
+  } catch {
+    return file; // fall back to original on error
+  }
+}
 
 export interface TickerData {
   id: number;
@@ -156,7 +174,8 @@ export async function sendChatMessage(tickerId: number, content: string, files?:
   const formData = new FormData();
   formData.append("content", content);
   if (files && files.length > 0) {
-    files.forEach(f => formData.append("files", f));
+    const compressed = await Promise.all(files.map(f => compressImageFile(f)));
+    compressed.forEach(f => formData.append("files", f));
   }
   const res = await fetch(`/api/tickers/${tickerId}/chat`, {
     method: "POST",
@@ -445,7 +464,7 @@ export interface DiaryAnalysis {
   lesson_of_the_day: string;
   prep_for_tomorrow: string;
   road_ahead?: string;
-  image_references?: Array<{ filename: string; path: string; context?: string; uploadedAt?: string; timestamp?: string; ai_critique?: string }>;
+  image_references?: Array<{ filename: string; path: string; context?: string; uploadedAt?: string; timestamp?: string; ai_critique?: string; is_critical?: boolean }>;
   blueprint_alignment?: {
     weekly: {
       status: "in_line" | "diverged" | "no_data";
@@ -471,6 +490,7 @@ export interface DiaryEntry {
   isFinalized: boolean;
   planAdherenceGrade: string | null;
   closingBias: string | null;
+  intradayChartUrl: string | null;
   dailyChartUrl: string | null;
   weeklyChartUrl: string | null;
   monthlyChartUrl: string | null;
@@ -489,13 +509,14 @@ export async function fetchDiaryEntry(id: number): Promise<DiaryEntry> {
   return res.json();
 }
 
-export async function generateDiary(tickerId: number, date: string, charts?: { daily?: File; weekly?: File; monthly?: File }): Promise<DiaryEntry> {
+export async function generateDiary(tickerId: number, date: string, charts?: { intraday?: File; daily?: File; weekly?: File; monthly?: File }): Promise<DiaryEntry> {
   const formData = new FormData();
   formData.append("tickerId", String(tickerId));
   formData.append("date", date);
-  if (charts?.daily) formData.append("daily_chart", charts.daily);
-  if (charts?.weekly) formData.append("weekly_chart", charts.weekly);
-  if (charts?.monthly) formData.append("monthly_chart", charts.monthly);
+  if (charts?.intraday) formData.append("intraday_chart", await compressImageFile(charts.intraday));
+  if (charts?.daily) formData.append("daily_chart", await compressImageFile(charts.daily));
+  if (charts?.weekly) formData.append("weekly_chart", await compressImageFile(charts.weekly));
+  if (charts?.monthly) formData.append("monthly_chart", await compressImageFile(charts.monthly));
   const res = await fetch("/api/diary/generate", {
     method: "POST",
     body: formData,
@@ -527,7 +548,8 @@ export async function sendTacticalChat(tickerId: number, content: string, files?
   const formData = new FormData();
   formData.append("content", content);
   if (files && files.length > 0) {
-    files.forEach(f => formData.append("files", f));
+    const compressed = await Promise.all(files.map(f => compressImageFile(f)));
+    compressed.forEach(f => formData.append("files", f));
   }
   const res = await fetch(`/api/tickers/${tickerId}/tactical-chat`, {
     method: "POST",

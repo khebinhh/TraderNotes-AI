@@ -116,6 +116,7 @@ export const tradingDiary = pgTable("trading_diary", {
   isFinalized: boolean("is_finalized").notNull().default(false),
   planAdherenceGrade: text("plan_adherence_grade"),
   closingBias: text("closing_bias"),
+  intradayChartUrl: text("intraday_chart_url"),
   dailyChartUrl: text("daily_chart_url"),
   weeklyChartUrl: text("weekly_chart_url"),
   monthlyChartUrl: text("monthly_chart_url"),

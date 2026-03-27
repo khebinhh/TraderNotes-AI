@@ -1,10 +1,11 @@
-import { useState, useMemo, memo, useRef } from "react";
+import { useState, useMemo, memo, useRef, useCallback } from "react";
 import {
   TrendingUp, TrendingDown, Minus, AlertTriangle, Calendar, CheckSquare,
   Square, ChevronDown, ChevronUp, Shield, Zap, Eye, MessageSquare, Save,
   Clock, Star, Filter, History, Users, Trash2, ChevronsUpDown, Layers,
-  Ruler, Timer, AlertOctagon, Target, Download
+  Ruler, Timer, AlertOctagon, Target, Printer, FileDown, Loader2
 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
@@ -447,29 +448,11 @@ function CollapsibleSection({ title, icon, count, isOpen, onToggle, children, co
   );
 }
 
-async function generatePdf(element: HTMLElement, title: string) {
-  const { default: jsPDF } = await import("jspdf");
-  const { default: html2canvas } = await import("html2canvas");
-  const images = Array.from(element.querySelectorAll("img"));
-  await Promise.all(images.map((img) => img.complete ? Promise.resolve() : img.decode().catch(() => {})));
-  const canvas = await html2canvas(element, { backgroundColor: "#0a0a0f", scale: 2, useCORS: true, allowTaint: false, logging: false });
-  const imgData = canvas.toDataURL("image/png");
-  const pdf = new jsPDF({ orientation: canvas.width > canvas.height ? "landscape" : "portrait", unit: "px", format: [canvas.width, canvas.height] });
-  pdf.addImage(imgData, "PNG", 0, 0, canvas.width, canvas.height);
-  const blob = pdf.output("blob");
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `${title}.pdf`;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
 
 export const PlaybookDashboard = memo(function PlaybookDashboard({ playbook, activeTickerSymbol, onSaveReview, onAddToChart, onDelete, isSavingReview, isDeleting }: PlaybookDashboardProps) {
   const isMobile = useIsMobile();
   const data: PlaybookData = playbook.playbookData as PlaybookData;
+  const { toast } = useToast();
   const [checkedScenarios, setCheckedScenarios] = useState<Set<string>>(new Set());
   const [reviewText, setReviewText] = useState(playbook.userReview || "");
   const [showReview, setShowReview] = useState(false);
@@ -602,9 +585,63 @@ export const PlaybookDashboard = memo(function PlaybookDashboard({ playbook, act
     });
   };
 
+  const handlePrint = () => {
+    const ticker = activeTickerSymbol || "Ticker";
+    const date = playbook.targetDateStart || new Date().toISOString().split("T")[0];
+    const originalTitle = document.title;
+    document.title = `TraderNotes_Playbook_${ticker}_${date}`;
+    window.print();
+    document.title = originalTitle;
+  };
+
+  const [isExportingPDF, setIsExportingPDF] = useState(false);
+
+  const handleExportPDF = async () => {
+    if (!reportRef.current || isExportingPDF) return;
+    setIsExportingPDF(true);
+    try {
+      const { default: jsPDF } = await import("jspdf");
+      const { default: html2canvas } = await import("html2canvas");
+      const ticker = activeTickerSymbol || "Ticker";
+      const date = playbook.targetDateStart || new Date().toISOString().split("T")[0];
+      const canvas = await html2canvas(reportRef.current, {
+        scale: 2,
+        useCORS: true,
+        allowTaint: true,
+        backgroundColor: "#0D0D0D",
+        logging: false,
+      });
+      const imgData = canvas.toDataURL("image/png");
+      const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const imgWidth = pageWidth;
+      const imgHeight = (canvas.height * imgWidth) / canvas.width;
+      let yOffset = 0;
+      let remaining = imgHeight;
+      while (remaining > 0) {
+        if (yOffset > 0) pdf.addPage();
+        pdf.addImage(imgData, "PNG", 0, -yOffset, imgWidth, imgHeight);
+        yOffset += pageHeight;
+        remaining -= pageHeight;
+      }
+      pdf.save(`TraderNotes_Playbook_${ticker}_${date}.pdf`);
+    } catch (err) {
+      console.error("PDF export error:", err);
+    } finally {
+      setIsExportingPDF(false);
+    }
+  };
+
   return (
     <ScrollArea className="h-full">
-      <div ref={reportRef} className={cn("max-w-4xl mx-auto space-y-6", isMobile ? "p-3" : "p-6")}>
+      <div ref={reportRef} className={cn("max-w-4xl mx-auto space-y-6 relative print-region", isMobile ? "p-3" : "p-6")}>
+        <div className="print-header">
+          <span className="print-header-left">TRADERNOTES AI</span>
+          <span className="print-header-right">
+            {[activeTickerSymbol, playbook.targetDateStart].filter(Boolean).join(" | ")}
+          </span>
+        </div>
 
         <div className={cn(
           "rounded-xl border",
@@ -1048,19 +1085,31 @@ export const PlaybookDashboard = memo(function PlaybookDashboard({ playbook, act
           </div>
         )}
 
-        <div className="flex justify-center pt-2">
+        <div className="flex justify-center gap-2 pt-2">
           <Button
             variant="outline"
             size="sm"
-            onClick={async () => {
-              if (!reportRef.current) return;
-              try { await generatePdf(reportRef.current, `playbook-${playbook.id}`); } catch {}
-            }}
-            className="font-mono text-xs tracking-wide border-muted-foreground/30 text-muted-foreground hover:text-foreground"
-            data-testid="button-download-playbook-pdf"
+            onClick={handlePrint}
+            className="font-mono text-xs tracking-wide border-muted-foreground/30 text-muted-foreground hover:text-foreground no-print"
+            data-testid="button-print-playbook"
           >
-            <Download className="h-3.5 w-3.5 mr-1.5 shrink-0" />
-            DOWNLOAD AS PDF
+            <Printer className="h-3.5 w-3.5 mr-1.5 shrink-0" />
+            PRINT
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleExportPDF}
+            disabled={isExportingPDF}
+            className="font-mono text-xs tracking-wide border-amber-500/30 text-amber-400 hover:text-amber-300 hover:border-amber-400/50 no-print"
+            data-testid="button-export-pdf-playbook"
+          >
+            {isExportingPDF ? (
+              <Loader2 className="h-3.5 w-3.5 mr-1.5 shrink-0 animate-spin" />
+            ) : (
+              <FileDown className="h-3.5 w-3.5 mr-1.5 shrink-0" />
+            )}
+            {isExportingPDF ? "EXPORTING..." : "DOWNLOAD PDF"}
           </Button>
         </div>
 
@@ -1109,6 +1158,10 @@ export const PlaybookDashboard = memo(function PlaybookDashboard({ playbook, act
             )}
           </div>
         )}
+
+        <div className="print-footer">
+          Confidential Trading Logic — Generated by TraderNotes AI.
+        </div>
       </div>
     </ScrollArea>
   );

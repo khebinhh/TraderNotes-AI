@@ -16,7 +16,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 
 interface PlaybookFallbackData {
   date: string;
@@ -87,6 +87,7 @@ const TacticalChatPanel = memo(function TacticalChatPanel({ activeTicker, messag
   const [isRetrying, setIsRetrying] = useState(false);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevTickerIdRef = useRef<number | undefined>(activeTicker?.id);
+  const [isScrolledUp, setIsScrolledUp] = useState(false);
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -144,11 +145,21 @@ const TacticalChatPanel = memo(function TacticalChatPanel({ activeTicker, messag
   });
 
   useEffect(() => {
-    if (scrollRef.current) {
-      const scrollContainer = scrollRef.current.querySelector("[data-radix-scroll-area-viewport]");
-      if (scrollContainer) scrollContainer.scrollTop = scrollContainer.scrollHeight;
-    }
-  }, [messages, optimisticMessages, isAiLoading]);
+    const viewport = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]");
+    if (!viewport) return;
+    const onScroll = () => {
+      const distFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+      setIsScrolledUp(distFromBottom > 300);
+    };
+    viewport.addEventListener("scroll", onScroll, { passive: true });
+    return () => viewport.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    if (isScrolledUp) return;
+    const scrollContainer = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]");
+    if (scrollContainer) scrollContainer.scrollTop = scrollContainer.scrollHeight;
+  }, [messages, optimisticMessages, isAiLoading, isScrolledUp]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = Array.from(e.target.files || []);
@@ -242,7 +253,8 @@ const TacticalChatPanel = memo(function TacticalChatPanel({ activeTicker, messag
         )}
       </div>
 
-      <ScrollArea className="flex-1" ref={scrollRef}>
+      <div className="relative flex-1 min-h-0">
+      <ScrollArea className="h-full" ref={scrollRef}>
         <div className="p-3 space-y-3">
           {tacticalMessages.length === 0 && (
             <div className="text-center py-8 px-2">
@@ -380,6 +392,27 @@ const TacticalChatPanel = memo(function TacticalChatPanel({ activeTicker, messag
           })()}
         </div>
       </ScrollArea>
+      <AnimatePresence>
+        {isScrolledUp && (
+          <motion.button
+            key="jump-to-present-tactical"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 6 }}
+            transition={{ duration: 0.18, ease: "easeOut" }}
+            onClick={() => {
+              const vp = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]");
+              if (vp) vp.scrollTo({ top: vp.scrollHeight, behavior: "smooth" });
+              setIsScrolledUp(false);
+            }}
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider text-primary border border-primary/40 bg-black/70 backdrop-blur-sm shadow-lg hover:bg-black/90 transition-colors"
+            data-testid="button-jump-to-present-tactical"
+          >
+            ↓ Jump to Present
+          </motion.button>
+        )}
+      </AnimatePresence>
+      </div>
 
       <div className="border-t border-border p-2 bg-card/30 shrink-0">
         {attachedFiles.length > 0 && (
